@@ -1,0 +1,10 @@
+node_modules/
+server/dist/
+client/dist/
+server/data/*.sqlite*
+data/*.sqlite*
+*.tsbuildinfo
+.DS_Store
+*.log
+.env
+.env.*

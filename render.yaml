@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: hira-agro-rice-mill-api
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.0.0
+      - key: RICE_MILL_TOKEN_SECRET
+        generateValue: true
+      - key: RICE_MILL_DATA_DIR
+        value: /opt/render/project/src/data

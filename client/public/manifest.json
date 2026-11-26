@@ -1,0 +1,10 @@
+{
+  "name": "Hira Agro Industry — Rice Mill ERP",
+  "short_name": "Hira Agro",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAF7F0",
+  "theme_color": "#1B4D3E",
+  "orientation": "any",
+  "icons": []
+}
