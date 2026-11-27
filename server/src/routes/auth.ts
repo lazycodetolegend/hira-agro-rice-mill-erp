@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 import { queryAll, queryOne, execute, withTransaction, nowIso } from '../db/connection.js';
@@ -18,6 +19,12 @@ import {
   generateBackupCodes,
   consumeBackupCode,
 } from '../utils/totp.js';
+import {
+  isEmailDeliveryConfigured,
+  maskEmail,
+  sendLoginOtpEmail,
+  sendMailMessage,
+} from '../utils/mailer.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { PERMISSIONS } from '../middleware/rbac.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
@@ -25,11 +32,28 @@ import { recordAudit } from '../middleware/audit.js';
 
 export const authRouter = Router();
 
-const loginLimiter = createRateLimiter('login', 15, 60_000);
-const twoFaLimiter = createRateLimiter('2fa', 10, 60_000);
+const loginLimiter = createRateLimiter('login', 30, 60_000);
+const twoFaLimiter = createRateLimiter('2fa', 25, 60_000);
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_DURATION_MS = 15 * 60 * 1000;
+const MAX_OTP_ATTEMPTS = 5;
+const SESSION_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+
+export function sanitizeBusiness(biz: any) {
+  if (!biz) return biz;
+  const { smtp_pass_enc, ...safe } = biz;
+  return {
+    ...safe,
+    smtp_configured: Boolean(smtp_pass_enc) || Boolean(process.env.SMTP_USER && process.env.SMTP_PASS) || Boolean(process.env.RESEND_API_KEY),
+    email_otp_active: isEmailOtpActiveForBusiness(biz),
+  };
+}
+
+export function isEmailOtpActiveForBusiness(biz: any): boolean {
+  const envConfigured = Boolean(process.env.SMTP_USER && process.env.SMTP_PASS) || Boolean(process.env.RESEND_API_KEY);
+  return (Boolean(biz?.email_otp_enabled) || envConfigured) && isEmailDeliveryConfigured(biz);
+}
 
 export interface VerifiedGoogleIdentity {
   sub: string;
@@ -109,7 +133,7 @@ function issueAuthenticatedSession(
     }
 
     const { rawToken, tokenHash } = generateSessionToken();
-    const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
     execute(
       `INSERT INTO sessions (id, business_id, user_id, device_id, token_hash, expires_at, is_revoked, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
@@ -133,7 +157,7 @@ function issueAuthenticatedSession(
     return { rawToken, deviceId, expiresAt };
   });
 
-  const business = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [user.business_id]);
+  const business = sanitizeBusiness(queryOne<any>('SELECT * FROM businesses WHERE id = ?', [user.business_id]));
 
   return {
     token: result.rawToken,
@@ -148,7 +172,9 @@ function issueAuthenticatedSession(
       roleCode: user.role_code,
       roleName: user.role_name,
       totpEnabled: Boolean(user.totp_enabled),
+      email: user.email || user.google_email || null,
       googleEmail: user.google_email || null,
+      emailOtpActive: Boolean(business?.email_otp_active),
       permissions: JSON.parse(user.permissions_json || '[]'),
     },
     business,
@@ -167,12 +193,68 @@ function createTwoFactorChallenge(
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
   execute(
     `INSERT INTO auth_challenges (
-      id, business_id, user_id, token_hash, auth_method, device_key, device_name, platform, expires_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, business_id, user_id, token_hash, auth_method, two_fa_type, device_key, device_name, platform, expires_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'TOTP', ?, ?, ?, ?, ?)`,
     [newId(), user.business_id, user.id, tokenHash, authMethod, deviceKey, deviceName, platform || 'web', expiresAt, now]
   );
   return {
     requires2FA: true,
+    twoFaType: 'TOTP' as const,
+    challengeToken: rawToken,
+    expiresAt,
+    userPreview: { username: user.username, fullName: user.full_name },
+  };
+}
+
+async function createAndSendEmailOtpChallenge(
+  user: any,
+  business: any,
+  authMethod: string,
+  deviceKey: string,
+  deviceName: string,
+  platform: string
+) {
+  const targetEmail = (user.email || user.google_email || '').trim().toLowerCase();
+  if (!targetEmail) {
+    throw new Error('NO_EMAIL_CONFIGURED');
+  }
+  const otp = String(crypto.randomInt(100000, 1000000));
+  const otpHash = hashToken(otp);
+  const { rawToken, tokenHash } = generateSessionToken();
+  const now = nowIso();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  await sendLoginOtpEmail({
+    business,
+    to: targetEmail,
+    fullName: user.full_name,
+    username: user.username,
+    otp,
+    deviceName,
+  });
+
+  execute(
+    `INSERT INTO auth_challenges (
+      id, business_id, user_id, token_hash, auth_method, two_fa_type, email_otp_hash, otp_attempts, last_otp_sent_at,
+      device_key, device_name, platform, expires_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, 'EMAIL_OTP', ?, 0, ?, ?, ?, ?, ?, ?)`,
+    [newId(), user.business_id, user.id, tokenHash, authMethod, otpHash, now, deviceKey, deviceName, platform || 'web', expiresAt, now]
+  );
+
+  recordAudit({
+    businessId: user.business_id,
+    userId: user.id,
+    deviceId: deviceKey,
+    action: 'EMAIL_OTP_SENT',
+    entityType: 'user',
+    entityId: user.id,
+    summary: `Login OTP sent to ${maskEmail(targetEmail)} for ${deviceName}`,
+  });
+
+  return {
+    requires2FA: true,
+    twoFaType: 'EMAIL_OTP' as const,
+    maskedEmail: maskEmail(targetEmail),
     challengeToken: rawToken,
     expiresAt,
     userPreview: { username: user.username, fullName: user.full_name },
@@ -197,7 +279,7 @@ const LoginSchema = z.object({
   platform: z.string().max(60).optional(),
 });
 
-authRouter.post('/login', loginLimiter, (req, res) => {
+authRouter.post('/login', loginLimiter, async (req, res) => {
   const parsed = LoginSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Username and password are required.' });
@@ -255,7 +337,27 @@ authRouter.post('/login', loginLimiter, (req, res) => {
     return;
   }
 
-  // Enforce 2FA challenge if TOTP is enabled on this user
+  const biz = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [user.business_id]);
+
+  // Primary 2-Step Verification: One-Time OTP sent exclusively to user's registered Email ID
+  if (isEmailOtpActiveForBusiness(biz)) {
+    try {
+      const ch = await createAndSendEmailOtpChallenge(user, biz, 'PASSWORD+EMAIL_OTP', dKey, dName, platform || 'web');
+      res.json(ch);
+      return;
+    } catch (err: any) {
+      if (err?.message === 'NO_EMAIL_CONFIGURED') {
+        res.status(403).json({
+          error: 'No OTP email address is assigned to this account. Ask Admin to set your email in Users & Roles.',
+        });
+        return;
+      }
+      res.status(503).json({ error: `Unable to send OTP email: ${err?.message || 'SMTP error'}` });
+      return;
+    }
+  }
+
+  // Legacy Authenticator TOTP fallback if Email OTP is not yet configured
   if (user.totp_enabled) {
     res.json(createTwoFactorChallenge(user, 'PASSWORD+2FA', dKey, dName, platform || 'web'));
     return;
@@ -272,7 +374,7 @@ authRouter.post('/login', loginLimiter, (req, res) => {
   }
 });
 
-// Two-Step Verification (TOTP or Backup Code)
+// Two-Step Verification (Email OTP, TOTP or Single-Use Backup Code)
 authRouter.post('/verify-2fa', twoFaLimiter, (req, res) => {
   const { challengeToken, code } = req.body || {};
   if (!challengeToken || !code) {
@@ -283,7 +385,13 @@ authRouter.post('/verify-2fa', twoFaLimiter, (req, res) => {
   const tokenHash = hashToken(String(challengeToken));
   const challenge = queryOne<any>('SELECT * FROM auth_challenges WHERE token_hash = ?', [tokenHash]);
   if (!challenge || challenge.consumed_at || challenge.expires_at < nowIso()) {
-    res.status(401).json({ error: '2FA challenge expired or invalid. Please sign in again.' });
+    res.status(401).json({ error: 'OTP expired or invalid. Please sign in again.' });
+    return;
+  }
+
+  if (Number(challenge.otp_attempts || 0) >= MAX_OTP_ATTEMPTS) {
+    execute('UPDATE auth_challenges SET consumed_at = ? WHERE id = ?', [nowIso(), challenge.id]);
+    res.status(401).json({ error: 'Too many invalid OTP attempts. Please sign in again.' });
     return;
   }
 
@@ -293,22 +401,41 @@ authRouter.post('/verify-2fa', twoFaLimiter, (req, res) => {
      WHERE u.id = ? AND u.business_id = ?`,
     [challenge.user_id, challenge.business_id]
   );
-  if (!user || !user.is_active || !user.totp_enabled || !user.totp_secret_enc) {
-    res.status(401).json({ error: '2FA not active for this user.' });
+  if (!user || !user.is_active) {
+    res.status(401).json({ error: 'User account not active.' });
     return;
   }
 
-  const secret = decryptSensitiveText(user.totp_secret_enc);
-  const totpCheck = verifyTotpCode(secret, String(code), Number(user.last_totp_step ?? -1));
-
+  const cleanCode = String(code).trim();
   let verified = false;
-  if (totpCheck.valid) {
-    verified = true;
-    execute('UPDATE users SET last_totp_step = ? WHERE id = ?', [totpCheck.matchedStep, user.id]);
+
+  if (challenge.two_fa_type === 'EMAIL_OTP') {
+    if (challenge.email_otp_hash && cleanCode.length === 6) {
+      const candidateHash = hashToken(cleanCode);
+      if (
+        candidateHash.length === challenge.email_otp_hash.length &&
+        crypto.timingSafeEqual(Buffer.from(candidateHash, 'hex'), Buffer.from(challenge.email_otp_hash, 'hex'))
+      ) {
+        verified = true;
+      }
+    }
   } else {
-    // Check single-use backup codes
+    if (!user.totp_enabled || !user.totp_secret_enc) {
+      res.status(401).json({ error: '2FA not active for this user.' });
+      return;
+    }
+    const secret = decryptSensitiveText(user.totp_secret_enc);
+    const totpCheck = verifyTotpCode(secret, cleanCode, Number(user.last_totp_step ?? -1));
+    if (totpCheck.valid) {
+      verified = true;
+      execute('UPDATE users SET last_totp_step = ? WHERE id = ?', [totpCheck.matchedStep, user.id]);
+    }
+  }
+
+  // Fallback to single-use backup codes if configured
+  if (!verified && user.totp_backup_codes_json) {
     const hashedCodes: string[] = JSON.parse(user.totp_backup_codes_json || '[]');
-    const backup = consumeBackupCode(String(code), hashedCodes);
+    const backup = consumeBackupCode(cleanCode, hashedCodes);
     if (backup.valid) {
       verified = true;
       execute('UPDATE users SET totp_backup_codes_json = ? WHERE id = ?', [
@@ -328,6 +455,13 @@ authRouter.post('/verify-2fa', twoFaLimiter, (req, res) => {
   }
 
   if (!verified) {
+    const nextAttempts = Number(challenge.otp_attempts || 0) + 1;
+    const exhausted = nextAttempts >= MAX_OTP_ATTEMPTS;
+    execute('UPDATE auth_challenges SET otp_attempts = ?, consumed_at = ? WHERE id = ?', [
+      nextAttempts,
+      exhausted ? nowIso() : null,
+      challenge.id,
+    ]);
     recordAudit({
       businessId: user.business_id,
       userId: user.id,
@@ -335,9 +469,15 @@ authRouter.post('/verify-2fa', twoFaLimiter, (req, res) => {
       action: '2FA_FAILED',
       entityType: 'user',
       entityId: user.id,
-      summary: `Invalid 2FA code from IP ${req.ip}`,
+      summary: `Invalid ${challenge.two_fa_type} code attempt #${nextAttempts} from IP ${req.ip}`,
     });
-    res.status(401).json({ error: 'Invalid 6-digit authenticator code or backup code.' });
+    res.status(401).json({
+      error: exhausted
+        ? 'Too many incorrect OTP codes. Challenge cancelled — please sign in again.'
+        : challenge.two_fa_type === 'EMAIL_OTP'
+          ? 'Invalid 6-digit Email OTP.'
+          : 'Invalid 6-digit code.',
+    });
     return;
   }
 
@@ -360,6 +500,53 @@ authRouter.post('/verify-2fa', twoFaLimiter, (req, res) => {
     }
     throw err;
   }
+});
+
+// Resend Email OTP on an active login challenge (30s cooldown)
+authRouter.post('/resend-otp', twoFaLimiter, async (req, res) => {
+  const { challengeToken } = req.body || {};
+  if (!challengeToken) {
+    res.status(400).json({ error: 'Challenge token is required.' });
+    return;
+  }
+  const tokenHash = hashToken(String(challengeToken));
+  const challenge = queryOne<any>('SELECT * FROM auth_challenges WHERE token_hash = ?', [tokenHash]);
+  if (!challenge || challenge.consumed_at || challenge.expires_at < nowIso() || challenge.two_fa_type !== 'EMAIL_OTP') {
+    res.status(401).json({ error: 'OTP session expired. Please sign in again.' });
+    return;
+  }
+  if (challenge.last_otp_sent_at && Date.now() - new Date(challenge.last_otp_sent_at).getTime() < 30_000) {
+    res.status(429).json({ error: 'Please wait 30 seconds before requesting another OTP email.' });
+    return;
+  }
+
+  const user = queryOne<any>('SELECT * FROM users WHERE id = ? AND is_active = 1', [challenge.user_id]);
+  const biz = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [challenge.business_id]);
+  const targetEmail = (user?.email || user?.google_email || '').trim().toLowerCase();
+  if (!user || !biz || !targetEmail) {
+    res.status(400).json({ error: 'User email not available for OTP.' });
+    return;
+  }
+
+  const otp = String(crypto.randomInt(100000, 1000000));
+  const now = nowIso();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+  await sendLoginOtpEmail({
+    business: biz,
+    to: targetEmail,
+    fullName: user.full_name,
+    username: user.username,
+    otp,
+    deviceName: challenge.device_name,
+  });
+
+  execute(
+    'UPDATE auth_challenges SET email_otp_hash = ?, otp_attempts = 0, last_otp_sent_at = ?, expires_at = ? WHERE id = ?',
+    [hashToken(otp), now, expiresAt, challenge.id]
+  );
+
+  res.json({ ok: true, maskedEmail: maskEmail(targetEmail) });
 });
 
 // Google Sign-In (Whitelisted users only)
@@ -408,6 +595,13 @@ authRouter.post('/google', loginLimiter, async (req, res) => {
 
     const dKey = deviceKey || `web-${req.ip || 'local'}`;
     const dName = deviceName || 'Google Sign-In Browser';
+    const fullBiz = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [user.business_id]);
+
+    if (isEmailOtpActiveForBusiness(fullBiz)) {
+      const ch = await createAndSendEmailOtpChallenge(user, fullBiz, 'GOOGLE+EMAIL_OTP', dKey, dName, platform || 'web');
+      res.json(ch);
+      return;
+    }
 
     if (user.totp_enabled) {
       res.json(createTwoFactorChallenge(user, 'GOOGLE+2FA', dKey, dName, platform || 'web'));
@@ -420,16 +614,21 @@ authRouter.post('/google', loginLimiter, async (req, res) => {
       res.status(403).json({ error: 'This device has been revoked by Admin.' });
       return;
     }
+    if (err?.message === 'NO_EMAIL_CONFIGURED') {
+      res.status(403).json({ error: 'No OTP email address is assigned to this account.' });
+      return;
+    }
     res.status(401).json({ error: err?.message || 'Google authentication failed.' });
   }
 });
 
-// 2FA Setup, Enable & Disable for authenticated users
+// 2FA Setup, Enable & Disable for authenticated users (LOCKED if 2FA or Email OTP is already enabled)
 authRouter.get('/security-status', requireAuth, (req, res) => {
   const u = queryOne<any>(
     'SELECT totp_enabled, google_email, email, last_login_at, totp_backup_codes_json FROM users WHERE id = ?',
     [req.auth!.userId]
   );
+  const biz = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]);
   const sessionsCount = queryOne<{ c: number }>(
     'SELECT COUNT(*) AS c FROM sessions WHERE user_id = ? AND is_revoked = 0 AND expires_at > ?',
     [req.auth!.userId, nowIso()]
@@ -437,6 +636,8 @@ authRouter.get('/security-status', requireAuth, (req, res) => {
   const backupRemaining = JSON.parse(u?.totp_backup_codes_json || '[]').length;
   res.json({
     totpEnabled: Boolean(u?.totp_enabled),
+    emailOtpEnabled: isEmailOtpActiveForBusiness(biz),
+    otpEmail: u?.email || u?.google_email || null,
     googleEmail: u?.google_email || u?.email || null,
     backupCodesRemaining: backupRemaining,
     activeSessionsCount: sessionsCount?.c || 0,
@@ -444,7 +645,112 @@ authRouter.get('/security-status', requireAuth, (req, res) => {
   });
 });
 
+// Admin Email OTP / Gmail SMTP configuration
+authRouter.get('/email-otp-config', requireAuth, requirePermission(PERMISSIONS.BUSINESS_MANAGE), (req, res) => {
+  const biz = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]);
+  const usingEnvVars = Boolean(process.env.SMTP_USER && process.env.SMTP_PASS) || Boolean(process.env.RESEND_API_KEY);
+  res.json({
+    emailOtpEnabled: Boolean(biz?.email_otp_enabled) || usingEnvVars,
+    deliveryConfigured: isEmailDeliveryConfigured(biz),
+    usingEnvVars,
+    smtpHost: biz?.smtp_host || 'smtp.gmail.com',
+    smtpPort: Number(biz?.smtp_port || 465),
+    smtpUser: biz?.smtp_user || '',
+    smtpFrom: biz?.smtp_from || '',
+    hasSavedPassword: Boolean(biz?.smtp_pass_enc),
+  });
+});
+
+authRouter.post('/email-otp-config', requireAuth, requirePermission(PERMISSIONS.BUSINESS_MANAGE), async (req, res) => {
+  try {
+    const { smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom, emailOtpEnabled, testRecipient } = req.body || {};
+    const biz = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]);
+    const encPass =
+      typeof smtpPass === 'string' && smtpPass.trim().length > 0 ? encryptSensitiveText(smtpPass.trim()) : undefined;
+
+    execute(
+      `UPDATE businesses SET
+         smtp_host = COALESCE(?, smtp_host),
+         smtp_port = COALESCE(?, smtp_port),
+         smtp_user = COALESCE(?, smtp_user),
+         smtp_pass_enc = COALESCE(?, smtp_pass_enc),
+         smtp_from = COALESCE(?, smtp_from),
+         updated_at = ?, updated_by = ?
+       WHERE id = ?`,
+      [
+        smtpHost?.trim() || null,
+        smtpPort ? Number(smtpPort) : null,
+        smtpUser?.trim() || null,
+        encPass ?? null,
+        smtpFrom?.trim() || null,
+        nowIso(),
+        req.auth!.userId,
+        req.auth!.businessId,
+      ]
+    );
+
+    const updatedBiz = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]);
+
+    if (emailOtpEnabled === true) {
+      const adminUser = queryOne<any>('SELECT email, google_email, full_name FROM users WHERE id = ?', [req.auth!.userId]);
+      const recipient = (testRecipient || adminUser?.email || adminUser?.google_email || updatedBiz?.smtp_user || '').trim();
+      if (!recipient) {
+        res.status(400).json({ error: 'Provide a valid Admin email address to test Email OTP delivery.' });
+        return;
+      }
+      await sendMailMessage(updatedBiz, {
+        to: recipient,
+        subject: `${updatedBiz.name || 'Hira Agro Industry'} — Email OTP Verification Active`,
+        text: `Your Email OTP Verification system is now active. Every new device sign-in will send a one-time 6-digit OTP to this email.`,
+        html: `<p>Your <strong>${updatedBiz.name || 'Hira Agro Industry'}</strong> Email OTP Two-Step Verification is now <strong>ACTIVE</strong>. Every new device sign-in will require a one-time 6-digit OTP sent to the user's registered email.</p>`,
+      });
+      execute('UPDATE businesses SET email_otp_enabled = 1, updated_at = ? WHERE id = ?', [
+        nowIso(),
+        req.auth!.businessId,
+      ]);
+      recordAudit({
+        businessId: req.auth!.businessId,
+        userId: req.auth!.userId,
+        deviceId: req.auth!.deviceId,
+        action: 'EMAIL_OTP_ENABLED',
+        entityType: 'business',
+        entityId: req.auth!.businessId,
+        summary: `Enabled mandatory Email OTP login verification (tested delivery to ${maskEmail(recipient)})`,
+      });
+      res.json({ ok: true, emailOtpEnabled: true, testedRecipient: maskEmail(recipient) });
+      return;
+    }
+
+    if (emailOtpEnabled === false) {
+      execute('UPDATE businesses SET email_otp_enabled = 0, updated_at = ? WHERE id = ?', [
+        nowIso(),
+        req.auth!.businessId,
+      ]);
+    }
+
+    res.json({ ok: true, emailOtpEnabled: Boolean(updatedBiz?.email_otp_enabled) });
+  } catch (err: any) {
+    res.status(400).json({ error: `Email delivery test failed: ${err?.message || 'Check Gmail App Password'}` });
+  }
+});
+
 authRouter.post('/2fa/setup', requireAuth, (req, res) => {
+  const existing = queryOne<any>('SELECT totp_enabled FROM users WHERE id = ?', [req.auth!.userId]);
+  const biz = queryOne<any>('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]);
+  if (isEmailOtpActiveForBusiness(biz)) {
+    res.status(403).json({
+      error: 'Email OTP Verification is active. Separate per-device Authenticator setup is disabled to keep one single OTP source.',
+    });
+    return;
+  }
+  // Security fix: NEVER allow overwriting an already-active TOTP secret from another logged-in session!
+  if (existing?.totp_enabled) {
+    res.status(403).json({
+      error: 'Two-Step Verification is already locked and active. You cannot overwrite it from another device without disabling or Admin reset.',
+    });
+    return;
+  }
+
   const secret = generateBase32Secret(20);
   const encryptedSecret = encryptSensitiveText(secret);
   execute('UPDATE users SET totp_secret_enc = ?, updated_at = ? WHERE id = ?', [
@@ -452,7 +758,6 @@ authRouter.post('/2fa/setup', requireAuth, (req, res) => {
     nowIso(),
     req.auth!.userId,
   ]);
-  const biz = queryOne<{ name: string }>('SELECT name FROM businesses WHERE id = ?', [req.auth!.businessId]);
   const otpauthUri = buildOtpAuthUri(req.auth!.username, biz?.name || 'Hira Agro Industry', secret);
   res.json({ secret, otpauthUri });
 });
@@ -588,9 +893,9 @@ authRouter.post('/logout', requireAuth, (req, res) => {
 });
 
 authRouter.get('/me', requireAuth, (req, res) => {
-  const business = queryOne('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]);
-  const u = queryOne<{ totp_enabled: number; google_email: string | null }>(
-    'SELECT totp_enabled, google_email FROM users WHERE id = ?',
+  const business = sanitizeBusiness(queryOne('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]));
+  const u = queryOne<{ totp_enabled: number; google_email: string | null; email: string | null }>(
+    'SELECT totp_enabled, google_email, email FROM users WHERE id = ?',
     [req.auth!.userId]
   );
   res.json({
@@ -603,7 +908,9 @@ authRouter.get('/me', requireAuth, (req, res) => {
       roleCode: req.auth!.roleCode,
       roleName: req.auth!.roleName,
       totpEnabled: Boolean(u?.totp_enabled),
+      email: u?.email || u?.google_email || null,
       googleEmail: u?.google_email || null,
+      emailOtpActive: Boolean(business?.email_otp_active),
       permissions: Array.from(req.auth!.permissions),
     },
     deviceId: req.auth!.deviceId,
@@ -727,7 +1034,7 @@ authRouter.patch('/users/:id', requireAuth, requirePermission(PERMISSIONS.USERS_
     return;
   }
 
-  const { fullName, roleId, isActive, password, phone, preferredLang, googleEmail, unlockAccount, reset2FA } = req.body;
+  const { fullName, roleId, isActive, password, phone, email, preferredLang, googleEmail, unlockAccount, reset2FA } = req.body;
   if (password) {
     const strengthErr = validatePasswordStrength(String(password));
     if (strengthErr) {
@@ -743,6 +1050,7 @@ authRouter.patch('/users/:id', requireAuth, requirePermission(PERMISSIONS.USERS_
        role_id = COALESCE(?, role_id),
        is_active = COALESCE(?, is_active),
        phone = COALESCE(?, phone),
+       email = CASE WHEN ? IS NOT NULL THEN NULLIF(LOWER(TRIM(?)), '') ELSE email END,
        preferred_lang = COALESCE(?, preferred_lang),
        google_email = CASE WHEN ? IS NOT NULL THEN NULLIF(LOWER(TRIM(?)), '') ELSE google_email END,
        google_sub = CASE WHEN ? IS NOT NULL AND LOWER(TRIM(?)) != COALESCE(LOWER(google_email), '') THEN NULL ELSE google_sub END,
@@ -759,6 +1067,8 @@ authRouter.patch('/users/:id', requireAuth, requirePermission(PERMISSIONS.USERS_
       roleId ?? null,
       isActive !== undefined ? (isActive ? 1 : 0) : null,
       phone ?? null,
+      email ?? null,
+      email ?? null,
       preferredLang ?? null,
       googleEmail ?? null,
       googleEmail ?? null,

@@ -25,6 +25,10 @@ export function SettingsAdminPage() {
   const [valuation, setValuation] = useState(business?.valuation_method || 'WEIGHTED_AVG');
   const [bagPrefix, setBagPrefix] = useState(business?.bag_prefix || 'BAG');
   const [googleClientId, setGoogleClientId] = useState(business?.google_client_id || '');
+  const [smtpUser, setSmtpUser] = useState('hiraagroindustry@gmail.com');
+  const [smtpPass, setSmtpPass] = useState('');
+  const [testOtpEmail, setTestOtpEmail] = useState('hiraagroindustry@gmail.com');
+  const [emailOtpStatus, setEmailOtpStatus] = useState<any>(null);
 
   // New User
   const [newUsername, setNewUsername] = useState('');
@@ -40,6 +44,13 @@ export function SettingsAdminPage() {
   const [cfType, setCfType] = useState('TEXT');
 
   const loadData = async () => {
+    if (hasPerm('business.manage')) {
+      const eCfg = await apiFetch<any>('/auth/email-otp-config').catch(() => null);
+      if (eCfg) {
+        setEmailOtpStatus(eCfg);
+        if (eCfg.smtpUser) setSmtpUser(eCfg.smtpUser);
+      }
+    }
     if (hasPerm('users.manage')) setUsers(await apiFetch('/auth/users'));
     if (hasPerm('roles.manage')) {
       const r = await apiFetch<any[]>('/auth/roles');
@@ -155,6 +166,7 @@ export function SettingsAdminPage() {
       </div>
 
       {tab === 'BUSINESS' && (
+        <div className="space-y-4">
         <form onSubmit={saveBusiness} className="card p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div><label className="text-xs font-bold">Mill / Business Name</label><input value={bizName} onChange={(e) => setBizName(e.target.value)} className="input-field" /></div>
           <div><label className="text-xs font-bold">GSTIN / Tax ID</label><input value={gstin} onChange={(e) => setGstin(e.target.value)} className="input-field" /></div>
@@ -186,6 +198,82 @@ export function SettingsAdminPage() {
           </div>
           <button type="submit" className="btn-primary sm:col-span-2">Save Configuration</button>
         </form>
+
+        {/* Email OTP (Single-Source 2FA) Gmail Setup */}
+        <div className="card p-4 space-y-3 border-l-4 border-l-[#1B4D3E]">
+          <div className="flex flex-wrap justify-between items-center gap-2">
+            <div>
+              <h3 className="font-bold text-base text-[#1B4D3E]">Email OTP Two-Step Verification (Gmail SMTP)</h3>
+              <p className="text-xs text-stone-600">
+                Sends a 1-time 6-digit OTP to Admin (<strong>hiraagroindustry@gmail.com</strong>) or Manager email whenever logging in on a new device. Already signed-in devices stay logged in until logout.
+              </p>
+            </div>
+            <span className={`px-3 py-1 rounded-full text-xs font-bold ${emailOtpStatus?.emailOtpEnabled ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900'}`}>
+              {emailOtpStatus?.emailOtpEnabled ? 'EMAIL OTP ACTIVE' : 'NOT ENABLED'}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div>
+              <label className="text-xs font-bold">Sender Gmail Address</label>
+              <input value={smtpUser} onChange={(e) => setSmtpUser(e.target.value)} placeholder="hiraagroindustry@gmail.com" className="input-field" />
+            </div>
+            <div>
+              <label className="text-xs font-bold">
+                Gmail 16-Char App Password {emailOtpStatus?.hasSavedPassword ? '(Saved ✓ — leave blank to keep)' : ''}
+              </label>
+              <input type="password" value={smtpPass} onChange={(e) => setSmtpPass(e.target.value)} placeholder="xxxx xxxx xxxx xxxx" className="input-field font-mono" />
+            </div>
+            <div>
+              <label className="text-xs font-bold">Test Delivery Email</label>
+              <input type="email" value={testOtpEmail} onChange={(e) => setTestOtpEmail(e.target.value)} className="input-field" />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={async () => {
+                setError('');
+                setMsg('');
+                try {
+                  const res = await apiFetch<any>('/auth/email-otp-config', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      smtpHost: 'smtp.gmail.com',
+                      smtpPort: 465,
+                      smtpUser: smtpUser.trim(),
+                      smtpPass: smtpPass.trim() || undefined,
+                      emailOtpEnabled: true,
+                      testRecipient: testOtpEmail.trim(),
+                    }),
+                  });
+                  setSmtpPass('');
+                  setMsg(`Test email delivered to ${res.testedRecipient} and Email OTP 2FA is now ACTIVE for all logins!`);
+                  await loadData();
+                  await refreshSession();
+                } catch (err: any) {
+                  setError(err.message);
+                }
+              }}
+              className="btn-primary text-xs"
+            >
+              Test Email & Enable Mandatory Email OTP
+            </button>
+            {emailOtpStatus?.emailOtpEnabled && !emailOtpStatus?.usingEnvVars && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await apiFetch('/auth/email-otp-config', { method: 'POST', body: JSON.stringify({ emailOtpEnabled: false }) });
+                  setMsg('Email OTP paused.');
+                  await loadData();
+                }}
+                className="btn-secondary text-xs text-red-700"
+              >
+                Pause Email OTP
+              </button>
+            )}
+          </div>
+        </div>
+        </div>
       )}
 
       {tab === 'USERS_ROLES' && (
@@ -212,13 +300,26 @@ export function SettingsAdminPage() {
                       <strong>{u.full_name}</strong> (@{u.username}) • <span className="text-xs font-semibold text-[#1B4D3E]">{u.role_name}</span>
                     </div>
                     <div className="text-xs text-stone-500">
-                      Google: <strong>{u.google_email || 'Not linked'}</strong> • 2FA: <strong>{u.totp_enabled ? 'Enabled' : 'Off'}</strong>
+                      OTP Email: <strong>{u.email || u.google_email || 'Not set'}</strong> • Google Login: <strong>{u.google_email || 'Not linked'}</strong> • Auth App: <strong>{u.totp_enabled ? 'Locked' : 'Off'}</strong>
                       {u.locked_until && new Date(u.locked_until) > new Date() && (
                         <span className="ml-2 text-red-700 font-bold">LOCKED</span>
                       )}
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const email = prompt(`Enter 2FA OTP Email for ${u.username}:`, u.email || u.google_email || '');
+                        if (email === null) return;
+                        await apiFetch(`/auth/users/${u.id}`, { method: 'PATCH', body: JSON.stringify({ email }) });
+                        setMsg(`Updated OTP Email for ${u.username}.`);
+                        loadData();
+                      }}
+                      className="btn-secondary !min-h-[32px] !py-1 !px-2.5 text-xs"
+                    >
+                      Set 2FA Email
+                    </button>
                     <button
                       type="button"
                       onClick={async () => {

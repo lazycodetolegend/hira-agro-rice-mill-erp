@@ -69,7 +69,10 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
     return;
   }
 
+  // Sliding session renewal: logged-in devices remain signed in until explicit logout or Admin revocation
+  const renewedExpiry = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString();
   execute('UPDATE devices SET last_seen_at = ? WHERE id = ?', [now, row.device_id]);
+  execute('UPDATE sessions SET expires_at = ? WHERE id = ?', [renewedExpiry, row.session_id]);
 
   let perms: string[] = [];
   try {

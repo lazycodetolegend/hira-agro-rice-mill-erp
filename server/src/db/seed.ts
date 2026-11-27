@@ -192,6 +192,7 @@ function createCleanBusinessInternal(): string {
         id: adminId,
         username: 'kalpesh1976',
         fullName: 'Kalpesh (Admin)',
+        email: 'hiraagroindustry@gmail.com',
         passwordHash: hashPassword('Kalpesh@#1976'),
         role: 'OWNER_ADMIN',
         lang: 'en',
@@ -200,6 +201,7 @@ function createCleanBusinessInternal(): string {
         id: managerId,
         username: 'Manager',
         fullName: 'Mill Manager',
+        email: null,
         passwordHash: hashPassword('Manager@#1289'),
         role: 'STORE_MANAGER',
         lang: 'en',
@@ -208,9 +210,9 @@ function createCleanBusinessInternal(): string {
 
     for (const u of users) {
       execute(
-        `INSERT INTO users (id, business_id, username, full_name, password_hash, role_id, preferred_lang, is_active, created_at, updated_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-        [u.id, businessId, u.username, u.fullName, u.passwordHash, roleIds.get(u.role)!, u.lang, now, now, adminId]
+        `INSERT INTO users (id, business_id, username, full_name, email, password_hash, role_id, preferred_lang, is_active, created_at, updated_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+        [u.id, businessId, u.username, u.fullName, u.email, u.passwordHash, roleIds.get(u.role)!, u.lang, now, now, adminId]
       );
     }
 

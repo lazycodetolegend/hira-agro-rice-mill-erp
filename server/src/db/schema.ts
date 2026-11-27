@@ -876,6 +876,12 @@ export function initSchema() {
   ensureCol('users', 'google_sub', 'TEXT');
   ensureCol('businesses', 'google_client_id', 'TEXT');
   ensureCol('businesses', 'require_2fa_all', 'INTEGER DEFAULT 0');
+  ensureCol('businesses', 'smtp_host', "TEXT DEFAULT 'smtp.gmail.com'");
+  ensureCol('businesses', 'smtp_port', 'INTEGER DEFAULT 465');
+  ensureCol('businesses', 'smtp_user', 'TEXT');
+  ensureCol('businesses', 'smtp_pass_enc', 'TEXT');
+  ensureCol('businesses', 'smtp_from', 'TEXT');
+  ensureCol('businesses', 'email_otp_enabled', 'INTEGER DEFAULT 0');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -884,6 +890,10 @@ export function initSchema() {
       user_id TEXT NOT NULL REFERENCES users(id),
       token_hash TEXT NOT NULL UNIQUE,
       auth_method TEXT NOT NULL DEFAULT 'PASSWORD',
+      two_fa_type TEXT NOT NULL DEFAULT 'TOTP',
+      email_otp_hash TEXT,
+      otp_attempts INTEGER NOT NULL DEFAULT 0,
+      last_otp_sent_at TEXT,
       device_key TEXT NOT NULL,
       device_name TEXT NOT NULL,
       platform TEXT,
@@ -891,5 +901,17 @@ export function initSchema() {
       consumed_at TEXT,
       created_at TEXT NOT NULL
     );
+  `);
+
+  ensureCol('auth_challenges', 'two_fa_type', "TEXT DEFAULT 'TOTP'");
+  ensureCol('auth_challenges', 'email_otp_hash', 'TEXT');
+  ensureCol('auth_challenges', 'otp_attempts', 'INTEGER DEFAULT 0');
+  ensureCol('auth_challenges', 'last_otp_sent_at', 'TEXT');
+
+  // Ensure default Admin email ID for OTP delivery if not yet set
+  db.exec(`
+    UPDATE users
+    SET email = 'hiraagroindustry@gmail.com'
+    WHERE LOWER(username) = 'kalpesh1976' AND (email IS NULL OR TRIM(email) = '');
   `);
 }

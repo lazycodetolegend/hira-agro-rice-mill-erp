@@ -132,25 +132,47 @@ export function SecurityPage() {
       {error && <div className="p-3 rounded-xl bg-red-50 border border-red-300 text-red-900 text-sm font-semibold">{error}</div>}
       {msg && <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-sm font-semibold">{msg}</div>}
 
+      {/* Single-Source Email OTP Verification Banner */}
+      <div className="card p-5 space-y-2 border-l-4 border-l-[#1B4D3E]">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-bold text-base text-[#1B4D3E]">
+            Email OTP Two-Step Verification
+          </h2>
+          <span
+            className={`px-3 py-1 rounded-full text-xs font-bold ${
+              status?.emailOtpEnabled ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900'
+            }`}
+          >
+            {status?.emailOtpEnabled ? 'EMAIL OTP ACTIVE' : 'CONFIGURE IN ADMIN SETTINGS'}
+          </span>
+        </div>
+        <p className="text-xs text-stone-700">
+          Registered Verification Email: <strong>{status?.otpEmail || 'Not set (Admin can assign in Users & Roles)'}</strong>
+        </p>
+        <p className="text-xs text-stone-600">
+          When active, every new device or logged-out sign-in requires both your password AND a 1-time 6-digit OTP sent exclusively to this email. Already signed-in devices stay logged in until you click Sign Out.
+        </p>
+      </div>
+
       {/* 2FA Card */}
       <div className="card p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="font-bold text-lg text-[#1B4D3E] flex items-center gap-2">
-              <KeyRound className="w-5 h-5" /> Two-Step Verification (Google Authenticator / Authy)
+              <KeyRound className="w-5 h-5" /> Authenticator App Backup (Locked Single Device)
             </h2>
             <p className="text-xs text-stone-600">
-              Generates 6-digit codes completely offline on your phone — works even when there is zero network at the mill.
+              Locked once enabled so another phone cannot overwrite or add a second authenticator.
             </p>
           </div>
-          <span className={`px-3 py-1 rounded-full text-xs font-bold ${status?.totpEnabled ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900'}`}>
-            {status?.totpEnabled ? '2FA ENABLED' : '2FA OFF'}
+          <span className={`px-3 py-1 rounded-full text-xs font-bold ${status?.totpEnabled ? 'bg-emerald-100 text-emerald-900' : 'bg-stone-100 text-stone-700'}`}>
+            {status?.totpEnabled ? 'LOCKED & ENABLED' : status?.emailOtpEnabled ? 'DISABLED (EMAIL OTP USED)' : 'OFF'}
           </span>
         </div>
 
-        {!status?.totpEnabled && !setupData && (
+        {!status?.totpEnabled && !status?.emailOtpEnabled && !setupData && (
           <button onClick={start2FASetup} className="btn-primary">
-            Enable Two-Step Verification (2FA)
+            Enable Authenticator 2FA
           </button>
         )}
 

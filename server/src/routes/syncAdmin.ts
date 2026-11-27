@@ -317,6 +317,8 @@ syncAdminRouter.get('/admin/backup', requireAuth, requirePermission(PERMISSIONS.
     let rows = queryAll<any>(`SELECT * FROM ${t} WHERE ${col} = ?`, [biz]);
     if (t === 'users') {
       rows = rows.map(({ password_hash: _p, totp_secret_enc: _s, totp_backup_codes_json: _b, ...safe }) => safe);
+    } else if (t === 'businesses') {
+      rows = rows.map(({ smtp_pass_enc: _sp, ...safe }) => safe);
     }
     backup.tables[t] = rows;
   }

@@ -12,6 +12,7 @@ process.env.RICE_MILL_DB_PATH = path.join(tmpDir, 'test.sqlite');
 const { createApp } = await import('../dist/index.js');
 const { generateTotpCode } = await import('../dist/utils/totp.js');
 const { setGoogleTokenVerifierForTest } = await import('../dist/routes/auth.js');
+const { setEmailOtpSenderForTest } = await import('../dist/utils/mailer.js');
 const app = createApp();
 const server = app.listen(0);
 const address = server.address() as { port: number };
@@ -766,6 +767,110 @@ test('Rice Mill ERP End-to-End Acceptance Criteria', async (t) => {
     }, operatorToken);
     assert.equal(opPush.status, 200);
     assert.equal(opPush.json.results[0].status, 'REJECTED');
+  });
+
+  await t.test('13. Close 2FA Re-Enrollment Loophole & Enforce Single-Source Email OTP per User', async () => {
+    // 1) Loophole check: If Manager enables TOTP 2FA once, another logged-in session CANNOT overwrite it via /2fa/setup!
+    const mgrSetup1 = await api('/auth/2fa/setup', { method: 'POST' }, operatorToken);
+    assert.equal(mgrSetup1.status, 200);
+    const mgrTotp1 = generateTotpCode(mgrSetup1.json.secret, Math.floor(Date.now() / 30000));
+    const mgrEnable = await api('/auth/2fa/enable', { method: 'POST', body: JSON.stringify({ code: mgrTotp1 }) }, operatorToken);
+    assert.equal(mgrEnable.status, 200);
+    // Attempting to attach a 2nd Authenticator app MUST be rejected (403)!
+    const mgrSetup2 = await api('/auth/2fa/setup', { method: 'POST' }, operatorToken);
+    assert.equal(mgrSetup2.status, 403);
+
+    const sentEmails: Array<{ to: string; subject: string; text: string }> = [];
+    setEmailOtpSenderForTest(async (msg) => {
+      sentEmails.push({ to: msg.to, subject: msg.subject, text: msg.text });
+    });
+
+    // 2) Assign Manager email ID and configure + enable Email OTP verification
+    const usersList = (await api('/auth/users', {}, adminToken)).json;
+    const mgr = usersList.find((u: any) => u.username === 'Manager');
+    assert.ok(mgr);
+    await api(`/auth/users/${mgr.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ email: 'manager.mill@hiraagro.test' }),
+    }, adminToken);
+
+    const cfgRes = await api('/auth/email-otp-config', {
+      method: 'POST',
+      body: JSON.stringify({
+        smtpHost: 'smtp.gmail.com',
+        smtpPort: 465,
+        smtpUser: 'hiraagroindustry@gmail.com',
+        smtpPass: 'abcd efgh ijkl mnop',
+        emailOtpEnabled: true,
+        testRecipient: 'hiraagroindustry@gmail.com',
+      }),
+    }, adminToken);
+    assert.equal(cfgRes.status, 200);
+    assert.equal(cfgRes.json.emailOtpEnabled, true);
+    assert.equal(sentEmails.at(-1)?.to, 'hiraagroindustry@gmail.com');
+
+    // smtp_pass_enc must NEVER leak in /business or /admin/backup
+    const bizRes = await api('/business', {}, adminToken);
+    assert.equal(bizRes.json.smtp_pass_enc, undefined);
+    assert.equal(bizRes.json.smtp_configured, true);
+    const bak = await api('/admin/backup', {}, adminToken);
+    assert.equal(bak.json.tables.businesses[0].smtp_pass_enc, undefined);
+
+    // Attempting /2fa/setup while Email OTP is active must be rejected (403)
+    const setupBlocked = await api('/auth/2fa/setup', { method: 'POST' }, adminToken);
+    assert.equal(setupBlocked.status, 403);
+
+    // 3) Admin login on a new device MUST send 6-digit OTP to hiraagroindustry@gmail.com (not bypassable!)
+    const adminNewLogin = await api('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'kalpesh1976', password: 'Kalpesh@#1976', deviceKey: 'new-phone-1', deviceName: 'New Phone' }),
+    });
+    assert.equal(adminNewLogin.status, 200);
+    assert.equal(adminNewLogin.json.requires2FA, true);
+    assert.equal(adminNewLogin.json.twoFaType, 'EMAIL_OTP');
+    assert.ok(!adminNewLogin.json.token);
+
+    const adminEmailMsg = sentEmails.at(-1)!;
+    assert.equal(adminEmailMsg.to, 'hiraagroindustry@gmail.com');
+    const otpMatch = adminEmailMsg.text.match(/OTP is:\s*(\d{6})/);
+    assert.ok(otpMatch, 'OTP email must contain 6-digit OTP');
+    const otpCode = otpMatch![1];
+
+    // Wrong OTP 5 times destroys the challenge
+    for (let i = 0; i < 5; i++) {
+      const bad = await api('/auth/verify-2fa', {
+        method: 'POST',
+        body: JSON.stringify({ challengeToken: adminNewLogin.json.challengeToken, code: '000000' }),
+      });
+      assert.equal(bad.status, 401);
+    }
+    // Even the real OTP is now rejected because challenge was cancelled after 5 wrong tries
+    const blockedAfterExhaust = await api('/auth/verify-2fa', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken: adminNewLogin.json.challengeToken, code: otpCode }),
+    });
+    assert.equal(blockedAfterExhaust.status, 401);
+
+    // Fresh login -> valid OTP succeeds for Admin and Manager (to their respective emails)
+    const mgrLogin = await api('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'Manager', password: 'Manager@#1289', deviceKey: 'mgr-phone-1', deviceName: 'Manager Phone' }),
+    });
+    assert.equal(mgrLogin.status, 200);
+    assert.equal(mgrLogin.json.requires2FA, true);
+    assert.equal(mgrLogin.json.twoFaType, 'EMAIL_OTP');
+    const mgrMail = sentEmails.at(-1)!;
+    assert.equal(mgrMail.to, 'manager.mill@hiraagro.test');
+    const mgrOtp = mgrMail.text.match(/OTP is:\s*(\d{6})/)![1];
+
+    const mgrOk = await api('/auth/verify-2fa', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken: mgrLogin.json.challengeToken, code: mgrOtp }),
+    });
+    assert.equal(mgrOk.status, 200);
+    assert.ok(mgrOk.json.token);
+
+    setEmailOtpSenderForTest(null);
   });
 
   server.close();

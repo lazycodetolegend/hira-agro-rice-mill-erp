@@ -12,7 +12,7 @@ declare global {
 }
 
 export function LoginPage() {
-  const { login, verify2FA, loginWithGoogle, unlockOffline, hasCachedSession, requiresPinForOffline } = useAuth();
+  const { login, verify2FA, resendOtp, loginWithGoogle, unlockOffline, hasCachedSession, requiresPinForOffline } = useAuth();
   const { lang, setLang, t } = useI18n();
 
   const [username, setUsername] = useState('');
@@ -25,6 +25,7 @@ export function LoginPage() {
     import.meta.env.VITE_GOOGLE_CLIENT_ID || null
   );
   const [error, setError] = useState('');
+  const [infoMsg, setInfoMsg] = useState('');
   const [busy, setBusy] = useState(false);
 
   const googleBtnRef = useRef<HTMLDivElement | null>(null);
@@ -156,6 +157,11 @@ export function LoginPage() {
             {error}
           </div>
         )}
+        {infoMsg && (
+          <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-xl p-3 text-sm font-medium">
+            {infoMsg}
+          </div>
+        )}
 
         {!challenge ? (
           <>
@@ -206,30 +212,64 @@ export function LoginPage() {
           </>
         ) : (
           <form onSubmit={handleVerify2FA} className="space-y-4">
-            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-950">
-              Signing in as <strong>{challenge.userPreview.fullName}</strong> (@{challenge.userPreview.username}).
-              Enter the 6-digit code from your Google Authenticator app (or an 8-character backup code).
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-950 space-y-1">
+              <div>
+                Signing in as <strong>{challenge.userPreview.fullName}</strong> (@{challenge.userPreview.username}).
+              </div>
+              {challenge.twoFaType === 'EMAIL_OTP' ? (
+                <div>
+                  A one-time 6-digit OTP was sent to <strong>{challenge.maskedEmail}</strong>. Enter it below to authorize this device (stays signed in until logout).
+                </div>
+              ) : (
+                <div>Enter the 6-digit code from your Google Authenticator app (or an 8-character backup code).</div>
+              )}
             </div>
             <div>
-              <label className="block text-sm font-semibold mb-1">6-Digit Authenticator / Backup Code</label>
+              <label className="block text-sm font-semibold mb-1">
+                {challenge.twoFaType === 'EMAIL_OTP' ? '6-Digit Email OTP' : '6-Digit Authenticator / Backup Code'}
+              </label>
               <input
                 type="text"
+                inputMode="numeric"
                 value={twoFaCode}
                 onChange={(e) => setTwoFaCode(e.target.value)}
-                placeholder="123456 or ABCD-EF12"
+                placeholder={challenge.twoFaType === 'EMAIL_OTP' ? '6-digit Email OTP' : '123456 or ABCD-EF12'}
                 className="input-field text-center text-xl tracking-widest font-mono"
                 autoFocus
                 required
               />
             </div>
             <button type="submit" disabled={busy} className="btn-primary w-full">
-              <KeyRound className="w-5 h-5" /> {busy ? 'Verifying...' : 'Verify & Sign In'}
+              <KeyRound className="w-5 h-5" /> {busy ? 'Verifying...' : 'Verify OTP & Sign In'}
             </button>
+            {challenge.twoFaType === 'EMAIL_OTP' && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setError('');
+                  setInfoMsg('');
+                  setBusy(true);
+                  try {
+                    const r = await resendOtp(challenge.challengeToken);
+                    setInfoMsg(`New OTP email sent to ${r.maskedEmail}.`);
+                  } catch (err: any) {
+                    setError(err.message);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                className="btn-secondary w-full text-sm"
+              >
+                Resend OTP Email
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
                 setChallenge(null);
                 setError('');
+                setInfoMsg('');
               }}
               className="btn-secondary w-full"
             >

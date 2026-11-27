@@ -4,13 +4,14 @@ import { newId } from '../utils/crypto.js';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { PERMISSIONS } from '../middleware/rbac.js';
 import { recordAudit } from '../middleware/audit.js';
+import { sanitizeBusiness } from './auth.js';
 
 export const mastersRouter = Router();
 
 // Business Profile & Settings
 mastersRouter.get('/business', requireAuth, (req, res) => {
   const biz = queryOne('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]);
-  res.json(biz);
+  res.json(sanitizeBusiness(biz));
 });
 
 mastersRouter.patch('/business', requireAuth, requirePermission(PERMISSIONS.BUSINESS_MANAGE), (req, res) => {
@@ -97,7 +98,7 @@ mastersRouter.patch('/business', requireAuth, requirePermission(PERMISSIONS.BUSI
     summary: 'Updated business profile/configuration',
   });
 
-  res.json(queryOne('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId]));
+  res.json(sanitizeBusiness(queryOne('SELECT * FROM businesses WHERE id = ?', [req.auth!.businessId])));
 });
 
 // Suppliers

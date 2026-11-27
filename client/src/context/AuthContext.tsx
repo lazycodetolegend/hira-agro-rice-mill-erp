@@ -19,12 +19,16 @@ export interface UserInfo {
   roleCode: string;
   roleName: string;
   totpEnabled?: boolean;
+  email?: string | null;
   googleEmail?: string | null;
+  emailOtpActive?: boolean;
   permissions: string[];
 }
 
 export interface TwoFactorChallenge {
   challengeToken: string;
+  twoFaType?: 'EMAIL_OTP' | 'TOTP';
+  maskedEmail?: string;
   userPreview: { username: string; fullName: string };
 }
 
@@ -38,6 +42,7 @@ interface AuthCtx {
   requiresPinForOffline: boolean;
   login: (username: string, password: string, deviceName?: string) => Promise<TwoFactorChallenge | null>;
   verify2FA: (challengeToken: string, code: string) => Promise<void>;
+  resendOtp: (challengeToken: string) => Promise<{ maskedEmail: string }>;
   loginWithGoogle: (idToken: string, deviceName?: string) => Promise<TwoFactorChallenge | null>;
   unlockOffline: (pin?: string) => Promise<boolean>;
   logout: () => Promise<void>;
@@ -144,7 +149,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }),
     });
     if (data.requires2FA) {
-      return { challengeToken: data.challengeToken, userPreview: data.userPreview };
+      return {
+        challengeToken: data.challengeToken,
+        twoFaType: data.twoFaType,
+        maskedEmail: data.maskedEmail,
+        userPreview: data.userPreview,
+      };
     }
     await applyAuthenticatedResponse(data);
     return null;
@@ -156,6 +166,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       body: JSON.stringify({ challengeToken, code }),
     });
     await applyAuthenticatedResponse(data);
+  };
+
+  const resendOtp = async (challengeToken: string) => {
+    return apiFetch<{ ok: boolean; maskedEmail: string }>('/auth/resend-otp', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken }),
+    });
   };
 
   const loginWithGoogle = async (idToken: string, deviceName?: string): Promise<TwoFactorChallenge | null> => {
@@ -170,7 +187,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }),
     });
     if (data.requires2FA) {
-      return { challengeToken: data.challengeToken, userPreview: data.userPreview };
+      return {
+        challengeToken: data.challengeToken,
+        twoFaType: data.twoFaType,
+        maskedEmail: data.maskedEmail,
+        userPreview: data.userPreview,
+      };
     }
     await applyAuthenticatedResponse(data);
     return null;
@@ -225,6 +247,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         requiresPinForOffline,
         login,
         verify2FA,
+        resendOtp,
         loginWithGoogle,
         unlockOffline,
         logout,
