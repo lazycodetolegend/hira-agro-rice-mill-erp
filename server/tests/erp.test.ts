@@ -10,6 +10,8 @@ process.env.RICE_MILL_DATA_DIR = tmpDir;
 process.env.RICE_MILL_DB_PATH = path.join(tmpDir, 'test.sqlite');
 
 const { createApp } = await import('../dist/index.js');
+const { generateTotpCode } = await import('../dist/utils/totp.js');
+const { setGoogleTokenVerifierForTest } = await import('../dist/routes/auth.js');
 const app = createApp();
 const server = app.listen(0);
 const address = server.address() as { port: number };
@@ -542,6 +544,124 @@ test('Rice Mill ERP End-to-End Acceptance Criteria', async (t) => {
     assert.equal(supplyLotRes.json.generated_bill.bill_type, 'SUPPLY_ONLY');
     assert.equal(supplyLotRes.json.generated_bill.tax_amount, 0);
     assert.equal(supplyLotRes.json.generated_bill.total_amount, 10000);
+  });
+
+  await t.test('11. Security Hardening: CORS, Security Headers, Lockout, TOTP 2FA + Replay/Backup, Google Sign-In Whitelist & Backup Scrubbing', async () => {
+    // 1) Security headers & strict CORS rejection
+    const healthRes = await fetch(`${BASE}/health`);
+    assert.equal(healthRes.headers.get('x-frame-options'), 'DENY');
+    assert.equal(healthRes.headers.get('x-content-type-options'), 'nosniff');
+
+    const badCors = await fetch(`${BASE}/health`, { headers: { Origin: 'https://evil-attacker.example' } });
+    assert.equal(badCors.status, 403);
+
+    // 2) Weak password rejected (400)
+    const rolesRes = await api('/auth/roles', {}, adminToken);
+    const mgrRole = rolesRes.json.find((r: any) => r.code === 'STORE_MANAGER');
+    const weakRes = await api('/auth/users', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'weakuser', fullName: 'Weak', password: 'password', roleId: mgrRole.id }),
+    }, adminToken);
+    assert.equal(weakRes.status, 400);
+
+    // 3) Create secure test user with linked Google email
+    const secUserRes = await api('/auth/users', {
+      method: 'POST',
+      body: JSON.stringify({
+        username: 'secuser',
+        fullName: 'Security Test User',
+        password: 'StrongPass@2026',
+        googleEmail: 'kalpesh.verified@gmail.com',
+        roleId: mgrRole.id,
+      }),
+    }, adminToken);
+    assert.equal(secUserRes.status, 201);
+
+    // 4) Account lockout after 5 wrong passwords
+    for (let i = 0; i < 4; i++) {
+      const fail = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: 'secuser', password: 'Wrong@123' }) });
+      assert.equal(fail.status, 401);
+    }
+    const locked = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: 'secuser', password: 'Wrong@123' }) });
+    assert.equal(locked.status, 423);
+
+    // Admin unlocks account
+    await api(`/auth/users/${secUserRes.json.id}`, { method: 'PATCH', body: JSON.stringify({ unlockAccount: true }) }, adminToken);
+
+    // 5) Login & enable TOTP 2FA
+    const secLogin = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: 'secuser', password: 'StrongPass@2026' }) });
+    assert.equal(secLogin.status, 200);
+    const secToken = secLogin.json.token;
+
+    const setup2fa = await api('/auth/2fa/setup', { method: 'POST' }, secToken);
+    assert.equal(setup2fa.status, 200);
+    const stepNow = Math.floor(Date.now() / 1000 / 30);
+    const code1 = generateTotpCode(setup2fa.json.secret, stepNow - 1);
+
+    const enable2fa = await api('/auth/2fa/enable', { method: 'POST', body: JSON.stringify({ code: code1 }) }, secToken);
+    assert.equal(enable2fa.status, 200);
+    assert.equal(enable2fa.json.backupCodes.length, 8);
+
+    // Replay of already used TOTP step must fail; next step succeeds
+    const login2fa = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: 'secuser', password: 'StrongPass@2026' }) });
+    assert.equal(login2fa.json.requires2FA, true);
+    assert.ok(!login2fa.json.token);
+
+    const replayFail = await api('/auth/verify-2fa', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken: login2fa.json.challengeToken, code: code1 }),
+    });
+    assert.equal(replayFail.status, 401);
+
+    const code2 = generateTotpCode(setup2fa.json.secret, stepNow);
+    const verifyOk = await api('/auth/verify-2fa', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken: login2fa.json.challengeToken, code: code2 }),
+    });
+    assert.equal(verifyOk.status, 200);
+    assert.ok(verifyOk.json.token);
+
+    // Backup code works once, then rejected on reuse
+    const loginBackup = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: 'secuser', password: 'StrongPass@2026' }) });
+    const backupOk = await api('/auth/verify-2fa', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken: loginBackup.json.challengeToken, code: enable2fa.json.backupCodes[0] }),
+    });
+    assert.equal(backupOk.status, 200);
+
+    const loginBackup2 = await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: 'secuser', password: 'StrongPass@2026' }) });
+    const backupReuseFail = await api('/auth/verify-2fa', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken: loginBackup2.json.challengeToken, code: enable2fa.json.backupCodes[0] }),
+    });
+    assert.equal(backupReuseFail.status, 401);
+
+    // 6) Google Sign-In Whitelist + 2FA enforcement
+    await api('/business', { method: 'PATCH', body: JSON.stringify({ google_client_id: 'test-google-client-id' }) }, adminToken);
+
+    setGoogleTokenVerifierForTest(async (tok) => {
+      if (tok === 'intruder-token') {
+        return { sub: 'g-999', email: 'stranger@gmail.com', emailVerified: true, aud: 'test-google-client-id' };
+      }
+      return { sub: 'g-123', email: 'kalpesh.verified@gmail.com', emailVerified: true, aud: 'test-google-client-id' };
+    });
+
+    const intruderRes = await api('/auth/google', { method: 'POST', body: JSON.stringify({ idToken: 'intruder-token' }) });
+    assert.equal(intruderRes.status, 403);
+
+    const validGoogleRes = await api('/auth/google', { method: 'POST', body: JSON.stringify({ idToken: 'valid-token' }) });
+    assert.equal(validGoogleRes.status, 200);
+    assert.equal(validGoogleRes.json.requires2FA, true);
+    setGoogleTokenVerifierForTest(null);
+
+    // 7) Backup export must scrub password_hash and totp_secret_enc
+    const backupRes = await api('/admin/backup', {}, adminToken);
+    assert.equal(backupRes.status, 200);
+    for (const u of backupRes.json.tables.users) {
+      assert.equal(u.password_hash, undefined);
+      assert.equal(u.totp_secret_enc, undefined);
+      assert.equal(u.totp_backup_codes_json, undefined);
+    }
   });
 
   server.close();

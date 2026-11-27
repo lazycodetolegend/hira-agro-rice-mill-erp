@@ -19,6 +19,7 @@ import {
   Search,
   Wifi,
   WifiOff,
+  ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useI18n } from '../context/I18nContext';
@@ -38,6 +39,7 @@ export type PageId =
   | 'accounting'
   | 'masters'
   | 'sync'
+  | 'security'
   | 'settings'
   | 'docs';
 
@@ -78,6 +80,7 @@ export function Layout({ activePage, onNavigate, children }: Props) {
     },
     { id: 'masters', label: t('nav.masters'), icon: Database, show: hasPerm('masters.view') },
     { id: 'sync', label: t('nav.sync'), icon: RefreshCw, show: true },
+    { id: 'security', label: 'Security & 2FA', icon: ShieldCheck, show: true },
     {
       id: 'settings',
       label: t('nav.settings'),

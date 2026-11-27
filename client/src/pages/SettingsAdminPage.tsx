@@ -24,11 +24,13 @@ export function SettingsAdminPage() {
   const [fyMonth, setFyMonth] = useState(String(business?.fiscal_year_start_month || 4));
   const [valuation, setValuation] = useState(business?.valuation_method || 'WEIGHTED_AVG');
   const [bagPrefix, setBagPrefix] = useState(business?.bag_prefix || 'BAG');
+  const [googleClientId, setGoogleClientId] = useState(business?.google_client_id || '');
 
   // New User
   const [newUsername, setNewUsername] = useState('');
   const [newFullName, setNewFullName] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [newGoogleEmail, setNewGoogleEmail] = useState('');
   const [newRoleId, setNewRoleId] = useState('');
 
   // New Custom Field
@@ -70,6 +72,7 @@ export function SettingsAdminPage() {
         fiscal_year_start_month: Number(fyMonth),
         valuation_method: valuation,
         bag_prefix: bagPrefix,
+        google_client_id: googleClientId.trim() || null,
       }),
     });
     await refreshSession();
@@ -82,9 +85,15 @@ export function SettingsAdminPage() {
     try {
       await apiFetch('/auth/users', {
         method: 'POST',
-        body: JSON.stringify({ username: newUsername, fullName: newFullName, password: newPassword, roleId: newRoleId }),
+        body: JSON.stringify({
+          username: newUsername,
+          fullName: newFullName,
+          password: newPassword,
+          googleEmail: newGoogleEmail.trim() || undefined,
+          roleId: newRoleId,
+        }),
       });
-      setNewUsername(''); setNewFullName(''); setNewPassword('');
+      setNewUsername(''); setNewFullName(''); setNewPassword(''); setNewGoogleEmail('');
       setMsg('User created.');
       await loadData();
     } catch (err: any) {
@@ -166,6 +175,15 @@ export function SettingsAdminPage() {
               <option value="FIFO">First-In, First-Out (FIFO)</option>
             </select>
           </div>
+          <div className="sm:col-span-2">
+            <label className="text-xs font-bold">Google Sign-In OAuth Client ID (Optional — restricts login to whitelisted Google emails)</label>
+            <input
+              value={googleClientId}
+              onChange={(e) => setGoogleClientId(e.target.value)}
+              placeholder="1234567890-xxxx.apps.googleusercontent.com"
+              className="input-field font-mono text-xs"
+            />
+          </div>
           <button type="submit" className="btn-primary sm:col-span-2">Save Configuration</button>
         </form>
       )}
@@ -173,10 +191,11 @@ export function SettingsAdminPage() {
       {tab === 'USERS_ROLES' && (
         <div className="space-y-4">
           {hasPerm('users.manage') && (
-            <form onSubmit={createUser} className="card p-4 grid grid-cols-1 sm:grid-cols-5 gap-2">
+            <form onSubmit={createUser} className="card p-4 grid grid-cols-1 sm:grid-cols-6 gap-2">
               <input value={newUsername} onChange={(e) => setNewUsername(e.target.value)} placeholder="Username" className="input-field" required />
               <input value={newFullName} onChange={(e) => setNewFullName(e.target.value)} placeholder="Full Name" className="input-field" required />
-              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Password (6+)" className="input-field" required />
+              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Strong Password (8+)" className="input-field" required />
+              <input type="email" value={newGoogleEmail} onChange={(e) => setNewGoogleEmail(e.target.value)} placeholder="Whitelisted Gmail (opt)" className="input-field" />
               <select value={newRoleId} onChange={(e) => setNewRoleId(e.target.value)} className="input-field">
                 {roles.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
               </select>
@@ -184,12 +203,63 @@ export function SettingsAdminPage() {
             </form>
           )}
           <div className="card p-4">
-            <h3 className="font-bold mb-2">Staff Users</h3>
+            <h3 className="font-bold mb-2">Staff Users & Security Access</h3>
             <div className="divide-y text-sm">
               {users.map((u) => (
-                <div key={u.id} className="py-2 flex justify-between">
-                  <span><strong>{u.full_name}</strong> (@{u.username})</span>
-                  <span className="text-xs font-semibold text-[#1B4D3E]">{u.role_name} • {u.is_active ? 'Active' : 'Disabled'}</span>
+                <div key={u.id} className="py-2.5 flex flex-wrap justify-between items-center gap-2">
+                  <div>
+                    <div>
+                      <strong>{u.full_name}</strong> (@{u.username}) • <span className="text-xs font-semibold text-[#1B4D3E]">{u.role_name}</span>
+                    </div>
+                    <div className="text-xs text-stone-500">
+                      Google: <strong>{u.google_email || 'Not linked'}</strong> • 2FA: <strong>{u.totp_enabled ? 'Enabled' : 'Off'}</strong>
+                      {u.locked_until && new Date(u.locked_until) > new Date() && (
+                        <span className="ml-2 text-red-700 font-bold">LOCKED</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const email = prompt(`Enter authorized Google Email for ${u.username} (leave blank to unlink):`, u.google_email || '');
+                        if (email === null) return;
+                        await apiFetch(`/auth/users/${u.id}`, { method: 'PATCH', body: JSON.stringify({ googleEmail: email }) });
+                        setMsg(`Updated Google Email for ${u.username}.`);
+                        loadData();
+                      }}
+                      className="btn-secondary !min-h-[32px] !py-1 !px-2.5 text-xs"
+                    >
+                      Link Gmail
+                    </button>
+                    {u.locked_until && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await apiFetch(`/auth/users/${u.id}`, { method: 'PATCH', body: JSON.stringify({ unlockAccount: true }) });
+                          setMsg(`Unlocked ${u.username}.`);
+                          loadData();
+                        }}
+                        className="btn-amber !min-h-[32px] !py-1 !px-2.5 text-xs"
+                      >
+                        Unlock
+                      </button>
+                    )}
+                    {Boolean(u.totp_enabled) && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!confirm(`Reset 2FA for ${u.username}?`)) return;
+                          await apiFetch(`/auth/users/${u.id}`, { method: 'PATCH', body: JSON.stringify({ reset2FA: true }) });
+                          setMsg(`2FA reset for ${u.username}.`);
+                          loadData();
+                        }}
+                        className="btn-secondary !min-h-[32px] !py-1 !px-2.5 text-xs text-red-700"
+                      >
+                        Reset 2FA
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>

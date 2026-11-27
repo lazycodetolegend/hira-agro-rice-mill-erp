@@ -1,6 +1,12 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { apiFetch, ApiError, setAuthToken, getAuthToken, getOrCreateDeviceKey } from '../api/client';
-import { saveEncryptedSession, loadEncryptedSession, clearOfflineSession } from '../offline/db';
+import {
+  saveEncryptedSession,
+  loadEncryptedSession,
+  clearOfflineSession,
+  hasOfflinePin,
+  verifyOfflinePin,
+} from '../offline/db';
 import { useI18n } from './I18nContext';
 
 export interface UserInfo {
@@ -11,7 +17,14 @@ export interface UserInfo {
   roleId: string;
   roleCode: string;
   roleName: string;
+  totpEnabled?: boolean;
+  googleEmail?: string | null;
   permissions: string[];
+}
+
+export interface TwoFactorChallenge {
+  challengeToken: string;
+  userPreview: { username: string; fullName: string };
 }
 
 interface AuthCtx {
@@ -21,8 +34,11 @@ interface AuthCtx {
   loading: boolean;
   offlineUnlocked: boolean;
   hasCachedSession: boolean;
-  login: (username: string, password: string, deviceName?: string) => Promise<void>;
-  unlockOffline: () => Promise<boolean>;
+  requiresPinForOffline: boolean;
+  login: (username: string, password: string, deviceName?: string) => Promise<TwoFactorChallenge | null>;
+  verify2FA: (challengeToken: string, code: string) => Promise<void>;
+  loginWithGoogle: (idToken: string, deviceName?: string) => Promise<TwoFactorChallenge | null>;
+  unlockOffline: (pin?: string) => Promise<boolean>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
   hasPerm: (perm: string) => boolean;
@@ -38,11 +54,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [offlineUnlocked, setOfflineUnlocked] = useState(false);
   const [hasCachedSession, setHasCachedSession] = useState(false);
+  const [requiresPinForOffline, setRequiresPinForOffline] = useState(false);
+
+  const applyAuthenticatedResponse = useCallback(
+    async (data: any) => {
+      setAuthToken(data.token);
+      setUser(data.user);
+      setBusiness(data.business);
+      setDeviceId(data.deviceId);
+      setOfflineUnlocked(false);
+      if (data.user?.preferredLang) setLang(data.user.preferredLang);
+      await saveEncryptedSession({
+        token: data.token,
+        user: data.user,
+        business: data.business,
+        deviceId: data.deviceId,
+      });
+      setHasCachedSession(true);
+      setRequiresPinForOffline(await hasOfflinePin());
+    },
+    [setLang]
+  );
 
   const refreshSession = useCallback(async () => {
     const token = getAuthToken();
     const cached = await loadEncryptedSession();
     setHasCachedSession(Boolean(cached?.user));
+    setRequiresPinForOffline(await hasOfflinePin());
 
     if (!token) {
       setLoading(false);
@@ -66,8 +104,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUser(null);
           setBusiness(null);
           setDeviceId(null);
-        } else if (cached?.user) {
-          // Fallback to cached session only when server is unreachable
+        } else if (cached?.user && !(await hasOfflinePin())) {
           setUser(cached.user);
           setBusiness(cached.business);
           setDeviceId(cached.deviceId);
@@ -77,7 +114,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUser(null);
         }
       }
-    } else if (cached?.user) {
+    } else if (cached?.user && !(await hasOfflinePin())) {
       setUser(cached.user);
       setBusiness(cached.business);
       setDeviceId(cached.deviceId);
@@ -90,7 +127,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     refreshSession();
   }, [refreshSession]);
 
-  const login = async (username: string, password: string, deviceName?: string) => {
+  const login = async (username: string, password: string, deviceName?: string): Promise<TwoFactorChallenge | null> => {
     const deviceKey = getOrCreateDeviceKey();
     const data = await apiFetch('/auth/login', {
       method: 'POST',
@@ -102,22 +139,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         platform: navigator.platform || 'web',
       }),
     });
-    setAuthToken(data.token);
-    setUser(data.user);
-    setBusiness(data.business);
-    setDeviceId(data.deviceId);
-    setOfflineUnlocked(false);
-    if (data.user?.preferredLang) setLang(data.user.preferredLang);
-    await saveEncryptedSession({
-      token: data.token,
-      user: data.user,
-      business: data.business,
-      deviceId: data.deviceId,
-    });
-    setHasCachedSession(true);
+    if (data.requires2FA) {
+      return { challengeToken: data.challengeToken, userPreview: data.userPreview };
+    }
+    await applyAuthenticatedResponse(data);
+    return null;
   };
 
-  const unlockOffline = async (): Promise<boolean> => {
+  const verify2FA = async (challengeToken: string, code: string) => {
+    const data = await apiFetch('/auth/verify-2fa', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken, code }),
+    });
+    await applyAuthenticatedResponse(data);
+  };
+
+  const loginWithGoogle = async (idToken: string, deviceName?: string): Promise<TwoFactorChallenge | null> => {
+    const deviceKey = getOrCreateDeviceKey();
+    const data = await apiFetch('/auth/google', {
+      method: 'POST',
+      body: JSON.stringify({
+        idToken,
+        deviceKey,
+        deviceName: deviceName || navigator.userAgent.slice(0, 40),
+        platform: navigator.platform || 'web',
+      }),
+    });
+    if (data.requires2FA) {
+      return { challengeToken: data.challengeToken, userPreview: data.userPreview };
+    }
+    await applyAuthenticatedResponse(data);
+    return null;
+  };
+
+  const unlockOffline = async (pin?: string): Promise<boolean> => {
+    const pinRequired = await hasOfflinePin();
+    if (pinRequired) {
+      const ok = await verifyOfflinePin(pin || '');
+      if (!ok) return false;
+    }
     const cached = await loadEncryptedSession();
     if (cached?.user) {
       if (cached.token) setAuthToken(cached.token);
@@ -156,7 +216,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading,
         offlineUnlocked,
         hasCachedSession,
+        requiresPinForOffline,
         login,
+        verify2FA,
+        loginWithGoogle,
         unlockOffline,
         logout,
         refreshSession,

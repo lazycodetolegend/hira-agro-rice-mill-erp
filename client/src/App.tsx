@@ -15,6 +15,7 @@ import { CommercialPage } from './pages/CommercialPage';
 import { AccountingPage } from './pages/AccountingPage';
 import { MastersPage } from './pages/MastersPage';
 import { SyncConflictsPage } from './pages/SyncConflictsPage';
+import { SecurityPage } from './pages/SecurityPage';
 import { SettingsAdminPage } from './pages/SettingsAdminPage';
 import { HelpDocsPage } from './pages/HelpDocsPage';
 
@@ -70,6 +71,7 @@ function AppShell() {
       {page === 'accounting' && <AccountingPage />}
       {page === 'masters' && <MastersPage />}
       {page === 'sync' && <SyncConflictsPage />}
+      {page === 'security' && <SecurityPage />}
       {page === 'settings' && <SettingsAdminPage />}
       {page === 'docs' && <HelpDocsPage />}
     </Layout>

@@ -96,6 +96,40 @@ export async function clearOfflineSession() {
   await db.delete('kv', 'session');
 }
 
+async function hashPinWithSalt(pin: string, salt: string): Promise<string> {
+  const text = `${salt}:${pin}:ricemill-offline-pin`;
+  if (globalThis.crypto?.subtle) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
+}
+
+export async function saveOfflinePin(pin: string) {
+  const db = await getOfflineDb();
+  const salt = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const hash = await hashPinWithSalt(pin.trim(), salt);
+  await db.put('kv', { salt, hash }, 'offline_pin');
+}
+
+export async function hasOfflinePin(): Promise<boolean> {
+  const db = await getOfflineDb();
+  return Boolean(await db.get('kv', 'offline_pin'));
+}
+
+export async function verifyOfflinePin(pin: string): Promise<boolean> {
+  const db = await getOfflineDb();
+  const rec = await db.get('kv', 'offline_pin');
+  if (!rec) return true; // no PIN configured yet
+  const candidate = await hashPinWithSalt(pin.trim(), rec.salt);
+  return candidate === rec.hash;
+}
+
 export async function cacheSnapshot(snapshot: any) {
   const db = await getOfflineDb();
   await db.put('cache', snapshot, 'master_snapshot');

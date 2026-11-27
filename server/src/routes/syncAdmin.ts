@@ -314,7 +314,11 @@ syncAdminRouter.get('/admin/backup', requireAuth, requirePermission(PERMISSIONS.
   };
   for (const t of tables) {
     const col = t === 'businesses' ? 'id' : 'business_id';
-    backup.tables[t] = queryAll(`SELECT * FROM ${t} WHERE ${col} = ?`, [biz]);
+    let rows = queryAll<any>(`SELECT * FROM ${t} WHERE ${col} = ?`, [biz]);
+    if (t === 'users') {
+      rows = rows.map(({ password_hash: _p, totp_secret_enc: _s, totp_backup_codes_json: _b, ...safe }) => safe);
+    }
+    backup.tables[t] = rows;
   }
   recordAudit({
     businessId: biz,

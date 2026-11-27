@@ -46,6 +46,8 @@ mastersRouter.patch('/business', requireAuth, requirePermission(PERMISSIONS.BUSI
        approval_thresholds_json = COALESCE(?, approval_thresholds_json),
        offline_sync_settings_json = COALESCE(?, offline_sync_settings_json),
        tax_disclaimer_acknowledged = COALESCE(?, tax_disclaimer_acknowledged),
+       google_client_id = COALESCE(?, google_client_id),
+       require_2fa_all = COALESCE(?, require_2fa_all),
        updated_at = ?, updated_by = ?
      WHERE id = ?`,
     [
@@ -77,6 +79,8 @@ mastersRouter.patch('/business', requireAuth, requirePermission(PERMISSIONS.BUSI
       b.approval_thresholds ? JSON.stringify(b.approval_thresholds) : null,
       b.offline_sync_settings ? JSON.stringify(b.offline_sync_settings) : null,
       b.tax_disclaimer_acknowledged !== undefined ? (b.tax_disclaimer_acknowledged ? 1 : 0) : null,
+      b.google_client_id !== undefined ? (String(b.google_client_id).trim() || null) : null,
+      b.require_2fa_all !== undefined ? (b.require_2fa_all ? 1 : 0) : null,
       now,
       req.auth!.userId,
       req.auth!.businessId,

@@ -864,4 +864,32 @@ export function initSchema() {
   ensureCol('inbound_lots', 'bill_document_id', 'TEXT');
   ensureCol('purchase_documents', 'bill_type', "TEXT DEFAULT 'SUPPLY_ONLY'");
   ensureCol('sales_documents', 'bill_type', "TEXT DEFAULT 'SUPPLY_ONLY'");
+
+  // Security, 2FA & Google Sign-In columns
+  ensureCol('users', 'failed_login_attempts', 'INTEGER DEFAULT 0');
+  ensureCol('users', 'locked_until', 'TEXT');
+  ensureCol('users', 'totp_enabled', 'INTEGER DEFAULT 0');
+  ensureCol('users', 'totp_secret_enc', 'TEXT');
+  ensureCol('users', 'totp_backup_codes_json', 'TEXT');
+  ensureCol('users', 'last_totp_step', 'INTEGER DEFAULT -1');
+  ensureCol('users', 'google_email', 'TEXT');
+  ensureCol('users', 'google_sub', 'TEXT');
+  ensureCol('businesses', 'google_client_id', 'TEXT');
+  ensureCol('businesses', 'require_2fa_all', 'INTEGER DEFAULT 0');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS auth_challenges (
+      id TEXT PRIMARY KEY,
+      business_id TEXT NOT NULL REFERENCES businesses(id),
+      user_id TEXT NOT NULL REFERENCES users(id),
+      token_hash TEXT NOT NULL UNIQUE,
+      auth_method TEXT NOT NULL DEFAULT 'PASSWORD',
+      device_key TEXT NOT NULL,
+      device_name TEXT NOT NULL,
+      platform TEXT,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
 }
