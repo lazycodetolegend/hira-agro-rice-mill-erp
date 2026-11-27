@@ -192,7 +192,7 @@ function createCleanBusinessInternal(): string {
         id: adminId,
         username: 'kalpesh1976',
         fullName: 'Kalpesh (Admin)',
-        email: 'hiraagroindustry@gmail.com',
+        email: 'hiraagroindustry51@gmail.com',
         passwordHash: hashPassword('Kalpesh@#1976'),
         role: 'OWNER_ADMIN',
         lang: 'en',

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ricemill-erp-v11';
+const CACHE_NAME = 'ricemill-erp-v12';
 const CORE_SHELL = [
   '/',
   '/index.html',

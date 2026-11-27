@@ -799,15 +799,15 @@ test('Rice Mill ERP End-to-End Acceptance Criteria', async (t) => {
       body: JSON.stringify({
         smtpHost: 'smtp.gmail.com',
         smtpPort: 465,
-        smtpUser: 'hiraagroindustry@gmail.com',
+        smtpUser: 'hiraagroindustry51@gmail.com',
         smtpPass: 'abcd efgh ijkl mnop',
         emailOtpEnabled: true,
-        testRecipient: 'hiraagroindustry@gmail.com',
+        testRecipient: 'hiraagroindustry51@gmail.com',
       }),
     }, adminToken);
     assert.equal(cfgRes.status, 200);
     assert.equal(cfgRes.json.emailOtpEnabled, true);
-    assert.equal(sentEmails.at(-1)?.to, 'hiraagroindustry@gmail.com');
+    assert.equal(sentEmails.at(-1)?.to, 'hiraagroindustry51@gmail.com');
 
     // smtp_pass_enc must NEVER leak in /business or /admin/backup
     const bizRes = await api('/business', {}, adminToken);
@@ -820,7 +820,7 @@ test('Rice Mill ERP End-to-End Acceptance Criteria', async (t) => {
     const setupBlocked = await api('/auth/2fa/setup', { method: 'POST' }, adminToken);
     assert.equal(setupBlocked.status, 403);
 
-    // 3) Admin login on a new device MUST send 6-digit OTP to hiraagroindustry@gmail.com (not bypassable!)
+    // 3) Admin login on a new device MUST send 6-digit OTP to hiraagroindustry51@gmail.com (not bypassable!)
     const adminNewLogin = await api('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username: 'kalpesh1976', password: 'Kalpesh@#1976', deviceKey: 'new-phone-1', deviceName: 'New Phone' }),
@@ -831,7 +831,7 @@ test('Rice Mill ERP End-to-End Acceptance Criteria', async (t) => {
     assert.ok(!adminNewLogin.json.token);
 
     const adminEmailMsg = sentEmails.at(-1)!;
-    assert.equal(adminEmailMsg.to, 'hiraagroindustry@gmail.com');
+    assert.equal(adminEmailMsg.to, 'hiraagroindustry51@gmail.com');
     const otpMatch = adminEmailMsg.text.match(/OTP is:\s*(\d{6})/);
     assert.ok(otpMatch, 'OTP email must contain 6-digit OTP');
     const otpCode = otpMatch![1];

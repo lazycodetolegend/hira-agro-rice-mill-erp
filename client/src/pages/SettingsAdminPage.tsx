@@ -25,9 +25,9 @@ export function SettingsAdminPage() {
   const [valuation, setValuation] = useState(business?.valuation_method || 'WEIGHTED_AVG');
   const [bagPrefix, setBagPrefix] = useState(business?.bag_prefix || 'BAG');
   const [googleClientId, setGoogleClientId] = useState(business?.google_client_id || '');
-  const [smtpUser, setSmtpUser] = useState('hiraagroindustry@gmail.com');
+  const [smtpUser, setSmtpUser] = useState('hiraagroindustry51@gmail.com');
   const [smtpPass, setSmtpPass] = useState('');
-  const [testOtpEmail, setTestOtpEmail] = useState('hiraagroindustry@gmail.com');
+  const [testOtpEmail, setTestOtpEmail] = useState('hiraagroindustry51@gmail.com');
   const [emailOtpStatus, setEmailOtpStatus] = useState<any>(null);
 
   // New User
@@ -205,7 +205,7 @@ export function SettingsAdminPage() {
             <div>
               <h3 className="font-bold text-base text-[#1B4D3E]">Email OTP Two-Step Verification (Gmail SMTP)</h3>
               <p className="text-xs text-stone-600">
-                Sends a 1-time 6-digit OTP to Admin (<strong>hiraagroindustry@gmail.com</strong>) or Manager email whenever logging in on a new device. Already signed-in devices stay logged in until logout.
+                Sends a 1-time 6-digit OTP to Admin (<strong>hiraagroindustry51@gmail.com</strong>) or Manager email whenever logging in on a new device. Already signed-in devices stay logged in until logout.
               </p>
             </div>
             <span className={`px-3 py-1 rounded-full text-xs font-bold ${emailOtpStatus?.emailOtpEnabled ? 'bg-emerald-100 text-emerald-900' : 'bg-amber-100 text-amber-900'}`}>
@@ -215,7 +215,7 @@ export function SettingsAdminPage() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <div>
               <label className="text-xs font-bold">Sender Gmail Address</label>
-              <input value={smtpUser} onChange={(e) => setSmtpUser(e.target.value)} placeholder="hiraagroindustry@gmail.com" className="input-field" />
+              <input value={smtpUser} onChange={(e) => setSmtpUser(e.target.value)} placeholder="hiraagroindustry51@gmail.com" className="input-field" />
             </div>
             <div>
               <label className="text-xs font-bold">

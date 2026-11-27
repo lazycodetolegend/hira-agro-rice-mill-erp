@@ -908,10 +908,10 @@ export function initSchema() {
   ensureCol('auth_challenges', 'otp_attempts', 'INTEGER DEFAULT 0');
   ensureCol('auth_challenges', 'last_otp_sent_at', 'TEXT');
 
-  // Ensure default Admin email ID for OTP delivery if not yet set
+  // Ensure default Admin email ID for OTP delivery
   db.exec(`
     UPDATE users
-    SET email = 'hiraagroindustry@gmail.com'
-    WHERE LOWER(username) = 'kalpesh1976' AND (email IS NULL OR TRIM(email) = '');
+    SET email = 'hiraagroindustry51@gmail.com'
+    WHERE LOWER(username) = 'kalpesh1976' AND (email IS NULL OR TRIM(email) = '' OR LOWER(email) = 'hiraagroindustry@gmail.com');
   `);
 }
