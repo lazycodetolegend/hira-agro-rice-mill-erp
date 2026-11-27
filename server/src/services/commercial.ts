@@ -9,6 +9,7 @@ import { recordAudit } from '../middleware/audit.js';
 export interface PurchaseInput {
   businessId: string;
   docType: 'INVOICE' | 'RETURN';
+  billType?: 'GST' | 'SUPPLY_ONLY';
   docDate: string;
   dueDate?: string;
   supplierId: string;
@@ -68,7 +69,8 @@ export function createPurchaseDocument(input: PurchaseInput) {
       if (!prod) throw new Error(`Product not found: ${line.productId}`);
 
       let taxRate = 0;
-      if (line.taxId) {
+      const isSupplyOnly = input.billType === 'SUPPLY_ONLY';
+      if (line.taxId && !isSupplyOnly) {
         const tax = queryOne<{ rate_percent: number }>(
           'SELECT rate_percent FROM tax_settings WHERE id = ? AND business_id = ?',
           [line.taxId, input.businessId]
@@ -101,17 +103,19 @@ export function createPurchaseDocument(input: PurchaseInput) {
     const totalAmount = Number((subtotal - docDiscount + freightAmount + totalTax).toFixed(2));
     const status = input.postImmediately ? 'Posted' : 'Draft';
 
+    const billType = input.billType || (totalTax > 0 ? 'GST' : 'SUPPLY_ONLY');
     execute(
       `INSERT INTO purchase_documents (
-        id, business_id, doc_type, doc_number, doc_date, due_date, supplier_id,
+        id, business_id, doc_type, bill_type, doc_number, doc_date, due_date, supplier_id,
         truck_id, lot_id, original_purchase_id, subtotal, freight_amount, discount_amount,
         tax_amount, total_amount, paid_amount, status, notes, is_demo,
         created_at, updated_at, created_by, updated_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
       [
         docId,
         input.businessId,
         input.docType,
+        billType,
         docNumber,
         input.docDate,
         input.dueDate ?? input.docDate,
@@ -336,16 +340,18 @@ export function reversePurchaseDocument(
 
 export function getPurchaseDocument(businessId: string, docId: string) {
   const doc = queryOne<any>(
-    `SELECT pd.*, s.name AS supplier_name, s.phone AS supplier_phone, l.lot_number
+    `SELECT pd.*, s.name AS supplier_name, s.phone AS supplier_phone, s.gstin AS supplier_gstin, s.address AS supplier_address,
+            l.lot_number, t.truck_number, t.customer_name, t.customer_phone
      FROM purchase_documents pd
      JOIN suppliers s ON s.id = pd.supplier_id
      LEFT JOIN inbound_lots l ON l.id = pd.lot_id
+     LEFT JOIN trucks t ON t.id = pd.truck_id
      WHERE pd.id = ? AND pd.business_id = ?`,
     [docId, businessId]
   );
   if (!doc) return null;
   const lines = queryAll<any>(
-    `SELECT pl.*, p.name AS product_name, p.sku, w.name AS warehouse_name
+    `SELECT pl.*, p.name AS product_name, p.sku, p.hsn_code, w.name AS warehouse_name
      FROM purchase_lines pl
      JOIN products p ON p.id = pl.product_id
      JOIN warehouses w ON w.id = pl.warehouse_id
@@ -358,6 +364,7 @@ export function getPurchaseDocument(businessId: string, docId: string) {
 export interface SalesInput {
   businessId: string;
   docType: 'QUOTATION' | 'ORDER' | 'INVOICE' | 'RETURN';
+  billType?: 'GST' | 'SUPPLY_ONLY';
   docDate: string;
   dueDate?: string;
   customerId: string;
@@ -449,7 +456,8 @@ export function createSalesDocument(input: SalesInput) {
       if (!prod) throw new Error(`Product not found: ${productId}`);
 
       let taxRate = 0;
-      if (line.taxId) {
+      const isSupplyOnly = input.billType === 'SUPPLY_ONLY';
+      if (line.taxId && !isSupplyOnly) {
         const tax = queryOne<{ rate_percent: number }>(
           'SELECT rate_percent FROM tax_settings WHERE id = ? AND business_id = ?',
           [line.taxId, input.businessId]
@@ -484,17 +492,19 @@ export function createSalesDocument(input: SalesInput) {
     const totalAmount = Number((subtotal - docDiscount + totalTax).toFixed(2));
     const status = input.postImmediately && (input.docType === 'INVOICE' || input.docType === 'RETURN') ? 'Posted' : 'Draft';
 
+    const billType = input.billType || (totalTax > 0 ? 'GST' : 'SUPPLY_ONLY');
     execute(
       `INSERT INTO sales_documents (
-        id, business_id, doc_type, doc_number, doc_date, due_date, customer_id,
+        id, business_id, doc_type, bill_type, doc_number, doc_date, due_date, customer_id,
         original_sales_id, payment_terms, subtotal, discount_amount, tax_amount,
         total_amount, received_amount, total_cogs, delivery_status, status,
         notes, is_demo, created_at, updated_at, created_by, updated_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         docId,
         input.businessId,
         input.docType,
+        billType,
         docNumber,
         input.docDate,
         input.dueDate ?? input.docDate,
@@ -825,7 +835,7 @@ export function reverseSalesDocument(
 
 export function getSalesDocument(businessId: string, docId: string) {
   const doc = queryOne<any>(
-    `SELECT sd.*, c.name AS customer_name, c.phone AS customer_phone
+    `SELECT sd.*, c.name AS customer_name, c.phone AS customer_phone, c.gstin AS customer_gstin, c.address AS customer_address
      FROM sales_documents sd
      JOIN customers c ON c.id = sd.customer_id
      WHERE sd.id = ? AND sd.business_id = ?`,
@@ -833,7 +843,7 @@ export function getSalesDocument(businessId: string, docId: string) {
   );
   if (!doc) return null;
   const lines = queryAll<any>(
-    `SELECT sl.*, p.name AS product_name, p.sku, w.name AS warehouse_name, b.bag_number
+    `SELECT sl.*, p.name AS product_name, p.sku, p.hsn_code, w.name AS warehouse_name, b.bag_number
      FROM sales_lines sl
      JOIN products p ON p.id = sl.product_id
      JOIN warehouses w ON w.id = sl.warehouse_id

@@ -3,12 +3,16 @@ import { newId } from '../utils/crypto.js';
 import { toKg } from '../utils/units.js';
 import { nextSequenceNumber } from '../utils/numbering.js';
 import { recordInventoryMovement } from './inventory.js';
+import { createBags } from './bags.js';
+import { createPurchaseDocument, getPurchaseDocument } from './commercial.js';
 import { recordAudit } from '../middleware/audit.js';
 
 export interface CreateTruckLotInput {
   businessId: string;
   receivedAt?: string;
   truckNumber: string;
+  customerName?: string;
+  customerPhone?: string;
   driverName?: string;
   driverPhone?: string;
   supplierId?: string | null;
@@ -20,9 +24,11 @@ export interface CreateTruckLotInput {
   gradeId?: string | null;
   warehouseId: string;
   locationId?: string | null;
+  weightMode?: 'EXACT' | 'BAG_BY_BAG';
   weighbridgeGross: number;
   tareWeight: number;
   netWeight?: number;
+  weighedBags?: Array<{ netWeightKg: number; qrToken?: string }>;
   unit: string;
   moisturePercent?: number;
   foreignMatterPercent?: number;
@@ -33,6 +39,8 @@ export interface CreateTruckLotInput {
   freightCharges?: number;
   otherCharges?: number;
   taxId?: string | null;
+  billType?: 'GST' | 'SUPPLY_ONLY';
+  autoGenerateBill?: boolean;
   paymentTerms?: string;
   notes?: string;
   status?: 'Draft' | 'Received';
@@ -43,18 +51,39 @@ export interface CreateTruckLotInput {
 
 export function createTruckAndLot(input: CreateTruckLotInput) {
   return withTransaction(() => {
-    const grossKg = toKg(input.businessId, input.weighbridgeGross, input.unit);
-    const tareKg = toKg(input.businessId, input.tareWeight, input.unit);
-    const computedNetKg =
-      input.netWeight !== undefined && input.netWeight > 0
-        ? toKg(input.businessId, input.netWeight, input.unit)
-        : Number((grossKg - tareKg).toFixed(4));
+    const weightMode = input.weightMode === 'BAG_BY_BAG' ? 'BAG_BY_BAG' : 'EXACT';
+    let grossKg = 0;
+    let tareKg = 0;
+    let computedNetKg = 0;
 
-    if (grossKg <= 0 || tareKg < 0 || computedNetKg <= 0) {
-      throw new Error('Invalid weights: gross and net weight must be positive, tare cannot be negative.');
-    }
-    if (tareKg >= grossKg && input.netWeight === undefined) {
-      throw new Error('Tare weight cannot be greater than or equal to gross weight.');
+    if (weightMode === 'BAG_BY_BAG') {
+      const bagsList = input.weighedBags || [];
+      if (!bagsList.length) {
+        throw new Error('Add at least one weighed bag in Bag-by-Bag weighing mode.');
+      }
+      for (const b of bagsList) {
+        if (!b.netWeightKg || b.netWeightKg <= 0) {
+          throw new Error('Every weighed bag must have a positive weight (kg).');
+        }
+        computedNetKg += Number(b.netWeightKg);
+      }
+      computedNetKg = Number(computedNetKg.toFixed(4));
+      grossKg = computedNetKg;
+      tareKg = 0;
+    } else {
+      grossKg = toKg(input.businessId, input.weighbridgeGross, input.unit);
+      tareKg = toKg(input.businessId, input.tareWeight, input.unit);
+      computedNetKg =
+        input.netWeight !== undefined && input.netWeight > 0
+          ? toKg(input.businessId, input.netWeight, input.unit)
+          : Number((grossKg - tareKg).toFixed(4));
+
+      if (grossKg <= 0 || tareKg < 0 || computedNetKg <= 0) {
+        throw new Error('Invalid weights: gross and net weight must be positive, tare cannot be negative.');
+      }
+      if (tareKg >= grossKg && input.netWeight === undefined) {
+        throw new Error('Tare weight cannot be greater than or equal to gross weight.');
+      }
     }
 
     const prod = queryOne<{ id: string; variety_id: string | null; grade_id: string | null }>(
@@ -68,6 +97,39 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
       input.businessId,
     ]);
     if (!wh) throw new Error('Warehouse not found.');
+
+    const now = nowIso();
+    const customerName = (input.customerName || input.driverName || '').trim() || null;
+    const customerPhone = (input.customerPhone || input.driverPhone || '').trim() || null;
+
+    // Auto-create or reuse party record if Customer Name provided without supplierId
+    let resolvedSupplierId = input.supplierId || null;
+    if (!resolvedSupplierId && customerName) {
+      const existingSup = queryOne<{ id: string }>(
+        'SELECT id FROM suppliers WHERE business_id = ? AND LOWER(name) = LOWER(?)',
+        [input.businessId, customerName]
+      );
+      if (existingSup) {
+        resolvedSupplierId = existingSup.id;
+      } else {
+        resolvedSupplierId = newId();
+        execute(
+          `INSERT INTO suppliers (id, business_id, code, name, phone, is_active, is_demo, created_at, updated_at, created_by)
+           VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+          [
+            resolvedSupplierId,
+            input.businessId,
+            `SUP-${Math.floor(1000 + Math.random() * 9000)}`,
+            customerName,
+            customerPhone,
+            input.isDemo ?? 0,
+            now,
+            now,
+            input.userId,
+          ]
+        );
+      }
+    }
 
     const biz = queryOne<{ receiving_prefix: string; lot_prefix: string }>(
       'SELECT receiving_prefix, lot_prefix FROM businesses WHERE id = ?',
@@ -96,32 +158,37 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
 
     const truckId = newId();
     const lotId = newId();
-    const now = nowIso();
     const receivedAt = input.receivedAt || now;
     const status = input.status || 'Received';
+    const billType = input.billType || (input.taxId ? 'GST' : 'SUPPLY_ONLY');
+    const effectiveTaxId = billType === 'SUPPLY_ONLY' ? null : (input.taxId ?? null);
 
     execute(
       `INSERT INTO trucks (
         id, business_id, receiving_number, received_at, truck_number, driver_name, driver_phone,
+        customer_name, customer_phone, weight_mode,
         supplier_id, supplier_invoice_no, po_reference, weighbridge_gross_kg, tare_kg, net_kg,
         display_unit, freight_charges, other_charges, payment_terms, notes, is_demo,
         created_at, updated_at, created_by, updated_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         truckId,
         input.businessId,
         receivingNumber,
         receivedAt,
         input.truckNumber.trim().toUpperCase(),
-        input.driverName ?? null,
-        input.driverPhone ?? null,
-        input.supplierId ?? null,
+        customerName,
+        customerPhone,
+        customerName,
+        customerPhone,
+        weightMode,
+        resolvedSupplierId,
         input.supplierInvoiceNo ?? null,
         input.poReference ?? null,
         grossKg,
         tareKg,
         computedNetKg,
-        input.unit || 'kg',
+        weightMode === 'BAG_BY_BAG' ? 'kg' : (input.unit || 'kg'),
         freightCharges,
         otherCharges,
         input.paymentTerms ?? null,
@@ -139,16 +206,16 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
         id, business_id, lot_number, truck_id, supplier_id, product_id, material_type,
         variety_id, grade_id, warehouse_id, location_id, received_qty_kg, display_unit,
         moisture_percent, foreign_matter_percent, broken_percent, quality_remarks,
-        rate_per_kg, freight_per_kg, landed_cost_per_kg, tax_id,
+        rate_per_kg, freight_per_kg, landed_cost_per_kg, tax_id, bill_type,
         wastage_adjusted_kg, status, notes, sync_status, is_demo,
         created_at, updated_at, created_by, updated_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'Synced', ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'Synced', ?, ?, ?, ?, ?)`,
       [
         lotId,
         input.businessId,
         lotNumber,
         truckId,
-        input.supplierId ?? null,
+        resolvedSupplierId,
         input.productId,
         input.materialType,
         input.varietyId ?? prod.variety_id ?? null,
@@ -156,7 +223,7 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
         input.warehouseId,
         input.locationId ?? null,
         computedNetKg,
-        input.unit || 'kg',
+        weightMode === 'BAG_BY_BAG' ? 'kg' : (input.unit || 'kg'),
         input.moisturePercent ?? null,
         input.foreignMatterPercent ?? null,
         input.brokenPercent ?? null,
@@ -164,7 +231,8 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
         ratePerKg,
         freightPerKg,
         landedCostPerKg,
-        input.taxId ?? null,
+        effectiveTaxId,
+        billType,
         status,
         input.notes ?? null,
         input.isDemo ?? 0,
@@ -186,7 +254,7 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
         warehouseId: input.warehouseId,
         locationId: input.locationId,
         qtyKg: computedNetKg,
-        displayUnit: input.unit || 'kg',
+        displayUnit: weightMode === 'BAG_BY_BAG' ? 'kg' : (input.unit || 'kg'),
         unitCost: landedCostPerKg,
         sourceDocType: 'INBOUND_LOT',
         sourceDocId: lotId,
@@ -198,6 +266,92 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
       });
     }
 
+    // If weighed one-by-one bags, automatically create the individual QR bag records linked to this lot
+    if (weightMode === 'BAG_BY_BAG' && input.weighedBags?.length) {
+      createBags({
+        businessId: input.businessId,
+        sourceType: 'LOT',
+        lotId,
+        productId: input.productId,
+        varietyId: input.varietyId ?? prod.variety_id,
+        gradeId: input.gradeId ?? prod.grade_id,
+        warehouseId: input.warehouseId,
+        locationId: input.locationId,
+        packingDate: receivedAt.slice(0, 10),
+        costRatePerKg: landedCostPerKg,
+        mode: 'VARIABLE',
+        variableBags: input.weighedBags.map((wb) => ({ netWeightKg: Number(wb.netWeightKg), tareWeightKg: 0 })),
+        userId: input.userId,
+        deviceId: input.deviceId,
+        isDemo: input.isDemo ?? 0,
+      });
+    }
+
+    // Auto-generate GST or Supply-Only Bill when requested
+    if (input.autoGenerateBill && status === 'Received') {
+      // Ensure a party exists on the bill (fallback to Walk-in Customer if neither supplier nor customerName given)
+      let billSupplierId = resolvedSupplierId;
+      if (!billSupplierId) {
+        const walkInName = customerName || `Walk-in Farmer (${input.truckNumber.trim().toUpperCase()})`;
+        const existingWalk = queryOne<{ id: string }>(
+          'SELECT id FROM suppliers WHERE business_id = ? AND LOWER(name) = LOWER(?)',
+          [input.businessId, walkInName]
+        );
+        if (existingWalk) {
+          billSupplierId = existingWalk.id;
+        } else {
+          billSupplierId = newId();
+          execute(
+            `INSERT INTO suppliers (id, business_id, code, name, phone, is_active, is_demo, created_at, updated_at, created_by)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+            [
+              billSupplierId,
+              input.businessId,
+              `SUP-${Math.floor(1000 + Math.random() * 9000)}`,
+              walkInName,
+              customerPhone,
+              input.isDemo ?? 0,
+              now,
+              now,
+              input.userId,
+            ]
+          );
+        }
+        execute('UPDATE inbound_lots SET supplier_id = ? WHERE id = ?', [billSupplierId, lotId]);
+        execute('UPDATE trucks SET supplier_id = ? WHERE id = ?', [billSupplierId, truckId]);
+      }
+
+      const bill = createPurchaseDocument({
+        businessId: input.businessId,
+        docType: 'INVOICE',
+        billType,
+        docDate: receivedAt.slice(0, 10),
+        supplierId: billSupplierId,
+        truckId,
+        lotId,
+        freightAmount: freightCharges + otherCharges,
+        lines: [
+          {
+            productId: input.productId,
+            warehouseId: input.warehouseId,
+            qtyKg: computedNetKg,
+            displayUnit: weightMode === 'BAG_BY_BAG' ? 'kg' : (input.unit || 'kg'),
+            ratePerKg,
+            taxId: effectiveTaxId,
+          },
+        ],
+        postImmediately: true,
+        notes: `${billType === 'GST' ? 'GST Bill' : 'Supply Only Bill'} for Truck ${input.truckNumber.trim().toUpperCase()} (${lotNumber})`,
+        userId: input.userId,
+        deviceId: input.deviceId,
+        isDemo: input.isDemo ?? 0,
+      });
+
+      if (bill?.id) {
+        execute('UPDATE inbound_lots SET bill_document_id = ? WHERE id = ?', [bill.id, lotId]);
+      }
+    }
+
     recordAudit({
       businessId: input.businessId,
       userId: input.userId,
@@ -205,8 +359,8 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
       action: 'TRUCK_LOT_CREATED',
       entityType: 'inbound_lot',
       entityId: lotId,
-      summary: `Received ${lotNumber} (${computedNetKg} kg) via Truck ${input.truckNumber}`,
-      after: { truckId, receivingNumber, lotId, lotNumber, netKg: computedNetKg, status },
+      summary: `Received ${lotNumber} (${computedNetKg} kg, ${weightMode}) via Truck ${input.truckNumber}`,
+      after: { truckId, receivingNumber, lotId, lotNumber, netKg: computedNetKg, status, billType },
     });
 
     return getLotWithSummary(input.businessId, lotId);
@@ -215,10 +369,13 @@ export function createTruckAndLot(input: CreateTruckLotInput) {
 
 export function getLotWithSummary(businessId: string, lotId: string) {
   const lot = queryOne<any>(
-    `SELECT l.*, t.receiving_number, t.received_at, t.truck_number, t.driver_name, t.driver_phone,
+    `SELECT l.*, t.receiving_number, t.received_at, t.truck_number,
+            COALESCE(t.customer_name, t.driver_name) AS customer_name,
+            COALESCE(t.customer_phone, t.driver_phone) AS customer_phone,
+            t.weight_mode,
             t.supplier_invoice_no, t.po_reference, t.weighbridge_gross_kg, t.tare_kg AS truck_tare_kg,
             t.net_kg AS truck_net_kg, t.freight_charges, t.other_charges, t.payment_terms,
-            p.name AS product_name, p.sku AS product_sku,
+            p.name AS product_name, p.sku AS product_sku, p.hsn_code,
             s.name AS supplier_name, w.name AS warehouse_name
      FROM inbound_lots l
      JOIN trucks t ON t.id = l.truck_id
@@ -229,6 +386,8 @@ export function getLotWithSummary(businessId: string, lotId: string) {
     [lotId, businessId]
   );
   if (!lot) return null;
+
+  const generatedBill = lot.bill_document_id ? getPurchaseDocument(businessId, lot.bill_document_id) : null;
 
   const bagStats = queryOne<{
     bag_count: number;
@@ -268,6 +427,7 @@ export function getLotWithSummary(businessId: string, lotId: string) {
 
   return {
     ...lot,
+    generated_bill: generatedBill,
     summary: {
       total_received_kg: receivedKg,
       total_assigned_to_bags_kg: assignedKg,

@@ -849,4 +849,19 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_journal_lines_acc ON journal_lines(business_id, account_id);
     CREATE INDEX IF NOT EXISTS idx_audit_biz_time ON audit_logs(business_id, created_at);
   `);
+
+  // Safe additive column migrations for existing databases
+  const ensureCol = (table: string, col: string, def: string) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === col)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def};`);
+    }
+  };
+  ensureCol('trucks', 'customer_name', 'TEXT');
+  ensureCol('trucks', 'customer_phone', 'TEXT');
+  ensureCol('trucks', 'weight_mode', "TEXT DEFAULT 'EXACT'");
+  ensureCol('inbound_lots', 'bill_type', "TEXT DEFAULT 'SUPPLY_ONLY'");
+  ensureCol('inbound_lots', 'bill_document_id', 'TEXT');
+  ensureCol('purchase_documents', 'bill_type', "TEXT DEFAULT 'SUPPLY_ONLY'");
+  ensureCol('sales_documents', 'bill_type', "TEXT DEFAULT 'SUPPLY_ONLY'");
 }

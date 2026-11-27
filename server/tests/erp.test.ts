@@ -76,25 +76,19 @@ test('Rice Mill ERP End-to-End Acceptance Criteria', async (t) => {
     assert.equal(userRes.status, 201);
   });
 
-  await t.test('3. Create masters (warehouse, supplier, customer, products, tax) & 10-ton (10,000 kg) truck receipt', async () => {
-    // Create blank-mill masters via API
-    const wh1 = (await api('/masters/warehouses', { method: 'POST', body: JSON.stringify({ code: 'WH-1', name: 'Raw Paddy Godown' }) }, adminToken)).json;
-    const wh2 = (await api('/masters/warehouses', { method: 'POST', body: JSON.stringify({ code: 'WH-2', name: 'Finished Rice Godown' }) }, adminToken)).json;
-    assert.ok(wh1.id && wh2.id);
+  await t.test('3. Verify default Godown 1-3, Products, Taxes & 10-ton (10,000 kg) truck receipt', async () => {
+    catalog = (await api('/masters/catalog', {}, adminToken)).json;
+    const whNames = catalog.warehouses.map((w: any) => w.name);
+    assert.ok(whNames.includes('Godown No. 1'));
+    assert.ok(whNames.includes('Godown No. 2'));
+    assert.ok(whNames.includes('Godown No. 3'));
+    assert.ok(catalog.products.length >= 5);
+    assert.ok(catalog.taxes.length >= 2);
 
     const sup = (await api('/masters/suppliers', { method: 'POST', body: JSON.stringify({ name: 'Test Paddy Trader', phone: '9800000001' }) }, adminToken)).json;
     const cust = (await api('/masters/customers', { method: 'POST', body: JSON.stringify({ name: 'Test Grain Buyer', phone: '9800000002' }) }, adminToken)).json;
     assert.ok(sup.id && cust.id);
 
-    await api('/masters/taxes', { method: 'POST', body: JSON.stringify({ name: 'Exempt 0%', code: 'GST0', ratePercent: 0 }) }, adminToken);
-
-    await api('/masters/products', { method: 'POST', body: JSON.stringify({ sku: 'PAD-1', name: 'Sona Paddy', materialType: 'PADDY', defaultSaleRatePerKg: 24 }) }, adminToken);
-    await api('/masters/products', { method: 'POST', body: JSON.stringify({ sku: 'RICE-1', name: 'Sona Rice', materialType: 'RICE', defaultSaleRatePerKg: 52 }) }, adminToken);
-    await api('/masters/products', { method: 'POST', body: JSON.stringify({ sku: 'BRK-1', name: 'Broken Rice', materialType: 'BROKEN_RICE', defaultSaleRatePerKg: 28 }) }, adminToken);
-    await api('/masters/products', { method: 'POST', body: JSON.stringify({ sku: 'BRAN-1', name: 'Rice Bran', materialType: 'BRAN', defaultSaleRatePerKg: 18 }) }, adminToken);
-    await api('/masters/products', { method: 'POST', body: JSON.stringify({ sku: 'HUSK-1', name: 'Rice Husk', materialType: 'HUSK', defaultSaleRatePerKg: 6 }) }, adminToken);
-
-    catalog = (await api('/masters/catalog', {}, adminToken)).json;
     suppliers = (await api('/masters/suppliers', {}, adminToken)).json;
     customers = (await api('/masters/customers', {}, adminToken)).json;
 
@@ -482,6 +476,72 @@ test('Rice Mill ERP End-to-End Acceptance Criteria', async (t) => {
     const bsFinal = (await api('/accounting/reports/balance-sheet', {}, adminToken)).json;
     assert.equal(tbFinal.is_balanced, true);
     assert.equal(bsFinal.is_balanced, true);
+  });
+
+  await t.test('10. Bag-by-bag weighing + Customer Name/Phone + Auto-Generated GST & Supply-Only Bills', async () => {
+    const paddy = catalog.products.find((p: any) => p.material_type === 'PADDY');
+    const wh = catalog.warehouses.find((w: any) => w.name === 'Godown No. 2');
+    const gst5 = catalog.taxes.find((tx: any) => tx.rate_percent === 5);
+
+    const bagLotRes = await api('/lots', {
+      method: 'POST',
+      body: JSON.stringify({
+        truckNumber: 'MH-48-BM-9999',
+        customerName: 'Ramesh Farmer',
+        customerPhone: '9876543210',
+        materialType: 'PADDY',
+        productId: paddy.id,
+        warehouseId: wh.id,
+        weightMode: 'BAG_BY_BAG',
+        unit: 'kg',
+        weighbridgeGross: 0,
+        tareWeight: 0,
+        weighedBags: [{ netWeightKg: 50.5 }, { netWeightKg: 49.5 }],
+        ratePerUnit: 25,
+        rateUnit: 'kg',
+        billType: 'GST',
+        taxId: gst5.id,
+        autoGenerateBill: true,
+      }),
+    }, operatorToken);
+
+    assert.equal(bagLotRes.status, 201);
+    assert.equal(bagLotRes.json.received_qty_kg, 100);
+    assert.equal(bagLotRes.json.customer_name, 'Ramesh Farmer');
+    assert.equal(bagLotRes.json.customer_phone, '9876543210');
+    assert.equal(bagLotRes.json.summary.bag_count, 2);
+    assert.ok(bagLotRes.json.generated_bill);
+    assert.equal(bagLotRes.json.generated_bill.bill_type, 'GST');
+    assert.equal(bagLotRes.json.generated_bill.subtotal, 2500);
+    assert.equal(bagLotRes.json.generated_bill.tax_amount, 125);
+    assert.equal(bagLotRes.json.generated_bill.total_amount, 2625);
+
+    // Supply-Only Bill must enforce 0 tax
+    const supplyLotRes = await api('/lots', {
+      method: 'POST',
+      body: JSON.stringify({
+        truckNumber: 'MH-48-BM-8888',
+        customerName: 'Suresh Farmer',
+        customerPhone: '9876500000',
+        materialType: 'PADDY',
+        productId: paddy.id,
+        warehouseId: wh.id,
+        weightMode: 'EXACT',
+        unit: 'kg',
+        weighbridgeGross: 500,
+        tareWeight: 0,
+        ratePerUnit: 20,
+        rateUnit: 'kg',
+        billType: 'SUPPLY_ONLY',
+        taxId: gst5.id,
+        autoGenerateBill: true,
+      }),
+    }, operatorToken);
+
+    assert.equal(supplyLotRes.status, 201);
+    assert.equal(supplyLotRes.json.generated_bill.bill_type, 'SUPPLY_ONLY');
+    assert.equal(supplyLotRes.json.generated_bill.tax_amount, 0);
+    assert.equal(supplyLotRes.json.generated_bill.total_amount, 10000);
   });
 
   server.close();

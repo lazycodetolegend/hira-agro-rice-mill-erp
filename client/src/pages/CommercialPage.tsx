@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, RotateCcw, BookOpen } from 'lucide-react';
+import { Plus, RotateCcw, BookOpen, FileText } from 'lucide-react';
 import { apiFetch } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { StatusBadge } from '../components/StatusBadge';
+import { BillPreviewModal, type BillData } from '../components/BillPreviewModal';
 
 export function CommercialPage() {
-  const { hasPerm } = useAuth();
+  const { hasPerm, business } = useAuth();
   const [tab, setTab] = useState<'SALES' | 'PURCHASES' | 'EXPENSES' | 'PAYMENTS'>('SALES');
 
   const [sales, setSales] = useState<any[]>([]);
@@ -19,12 +20,14 @@ export function CommercialPage() {
   const [coa, setCoa] = useState<any[]>([]);
   const [lots, setLots] = useState<any[]>([]);
   const [journalModal, setJournalModal] = useState<any[] | null>(null);
+  const [activeBill, setActiveBill] = useState<BillData | null>(null);
   const [msg, setMsg] = useState('');
   const [error, setError] = useState('');
 
   // Sales form
   const [showSaleForm, setShowSaleForm] = useState(false);
   const [saleDocType, setSaleDocType] = useState<'INVOICE' | 'ORDER' | 'QUOTATION' | 'RETURN'>('INVOICE');
+  const [saleBillType, setSaleBillType] = useState<'GST' | 'SUPPLY_ONLY'>('GST');
   const [customerId, setCustomerId] = useState('');
   const [saleMode, setSaleMode] = useState<'BAG' | 'QTY'>('BAG');
   const [selectedBagIds, setSelectedBagIds] = useState<Set<string>>(new Set());
@@ -38,6 +41,7 @@ export function CommercialPage() {
   // Purchase form
   const [showPurchaseForm, setShowPurchaseForm] = useState(false);
   const [purDocType, setPurDocType] = useState<'INVOICE' | 'RETURN'>('INVOICE');
+  const [purBillType, setPurBillType] = useState<'GST' | 'SUPPLY_ONLY'>('SUPPLY_ONLY');
   const [supplierId, setSupplierId] = useState('');
   const [purLotId, setPurLotId] = useState('');
   const [purProductId, setPurProductId] = useState('');
@@ -162,9 +166,10 @@ export function CommercialPage() {
         method: 'POST',
         body: JSON.stringify({
           docType: saleDocType,
+          billType: saleBillType,
           docDate: new Date().toISOString().slice(0, 10),
           customerId,
-          lines,
+          lines: lines.map((l) => ({ ...l, taxId: saleBillType === 'GST' ? l.taxId : null })),
           postImmediately: saleDocType === 'INVOICE' || saleDocType === 'RETURN',
         }),
       });
@@ -172,6 +177,7 @@ export function CommercialPage() {
       setShowSaleForm(false);
       setSelectedBagIds(new Set());
       await loadData();
+      openDocBill('sales', doc.id);
     } catch (err: any) {
       setError(err.message);
     }
@@ -186,6 +192,7 @@ export function CommercialPage() {
         method: 'POST',
         body: JSON.stringify({
           docType: purDocType,
+          billType: purBillType,
           docDate: new Date().toISOString().slice(0, 10),
           supplierId,
           lotId: purLotId || null,
@@ -196,7 +203,7 @@ export function CommercialPage() {
               warehouseId: purWarehouseId,
               qtyKg: Number(purQtyKg),
               ratePerKg: Number(purRate),
-              taxId: purTaxId || null,
+              taxId: purBillType === 'GST' ? purTaxId || null : null,
             },
           ],
           postImmediately: true,
@@ -205,9 +212,39 @@ export function CommercialPage() {
       setMsg(`Purchase ${doc.doc_number} posted (₹${doc.total_amount}) with balanced accounting entry.`);
       setShowPurchaseForm(false);
       await loadData();
+      openDocBill('purchases', doc.id);
     } catch (err: any) {
       setError(err.message);
     }
+  };
+
+  const openDocBill = async (kind: 'sales' | 'purchases', id: string) => {
+    const doc = await apiFetch<any>(`/${kind}/${id}`);
+    setActiveBill({
+      docNumber: doc.doc_number,
+      docDate: doc.doc_date,
+      billType: (doc.bill_type || (doc.tax_amount > 0 ? 'GST' : 'SUPPLY_ONLY')) as 'GST' | 'SUPPLY_ONLY',
+      partyLabel: kind === 'sales' ? 'Customer' : 'Customer / Party',
+      partyName: kind === 'sales' ? doc.customer_name : (doc.customer_name || doc.supplier_name),
+      partyPhone: kind === 'sales' ? doc.customer_phone : (doc.customer_phone || doc.supplier_phone),
+      partyGstin: kind === 'sales' ? doc.customer_gstin : doc.supplier_gstin,
+      truckNumber: doc.truck_number || undefined,
+      lotNumber: doc.lot_number || undefined,
+      subtotal: doc.subtotal,
+      freightAmount: doc.freight_amount || 0,
+      discountAmount: doc.discount_amount || 0,
+      taxAmount: doc.tax_amount || 0,
+      totalAmount: doc.total_amount,
+      lines: (doc.lines || []).map((l: any) => ({
+        description: l.description || l.product_name,
+        hsnCode: l.hsn_code,
+        qtyKg: l.qty_kg,
+        ratePerKg: l.rate_per_kg,
+        taxRatePercent: l.tax_rate_percent,
+        taxAmount: l.tax_amount,
+        lineTotal: l.line_total,
+      })),
+    });
   };
 
   const handleCreateExpense = async (e: React.FormEvent) => {
@@ -313,20 +350,26 @@ export function CommercialPage() {
 
           {showSaleForm && (
             <form onSubmit={handleCreateSale} className="card p-4 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
                 <select value={saleDocType} onChange={(e) => setSaleDocType(e.target.value as any)} className="input-field">
                   <option value="INVOICE">Sales Invoice</option>
                   <option value="ORDER">Sales Order</option>
                   <option value="QUOTATION">Quotation</option>
                   <option value="RETURN">Sales Return / Credit Note</option>
                 </select>
+                <select value={saleBillType} onChange={(e) => setSaleBillType(e.target.value as any)} className="input-field">
+                  <option value="GST">GST Bill (Tax Invoice)</option>
+                  <option value="SUPPLY_ONLY">Supply Only Bill (0%)</option>
+                </select>
                 <select value={customerId} onChange={(e) => setCustomerId(e.target.value)} className="input-field" required>
                   {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
                 <input type="number" step="0.01" value={saleRate} onChange={(e) => setSaleRate(e.target.value)} placeholder="Rate ₹/kg" className="input-field" required />
-                <select value={saleTaxId} onChange={(e) => setSaleTaxId(e.target.value)} className="input-field">
-                  {catalog.taxes.map((tx: any) => <option key={tx.id} value={tx.id}>{tx.name} ({tx.rate_percent}%)</option>)}
-                </select>
+                {saleBillType === 'GST' && (
+                  <select value={saleTaxId} onChange={(e) => setSaleTaxId(e.target.value)} className="input-field">
+                    {catalog.taxes.map((tx: any) => <option key={tx.id} value={tx.id}>{tx.name} ({tx.rate_percent}%)</option>)}
+                  </select>
+                )}
               </div>
 
               <div className="flex gap-2">
@@ -403,6 +446,9 @@ export function CommercialPage() {
                     <td className="p-3 text-right text-stone-600">₹{Number(s.total_cogs || 0).toLocaleString('en-IN')}</td>
                     <td className="p-3"><StatusBadge status={s.status} /></td>
                     <td className="p-3 flex gap-1">
+                      <button onClick={() => openDocBill('sales', s.id)} className="btn-amber !min-h-[32px] !py-1 !px-2 text-xs">
+                        <FileText className="w-3.5 h-3.5" /> Bill
+                      </button>
                       {hasPerm('accounting.view') && (
                         <button onClick={() => inspectJournals(s.id)} className="btn-secondary !min-h-[32px] !py-1 !px-2 text-xs">
                           <BookOpen className="w-3.5 h-3.5" /> Journal
@@ -440,6 +486,10 @@ export function CommercialPage() {
                 <option value="INVOICE">Purchase Invoice</option>
                 <option value="RETURN">Purchase Return</option>
               </select>
+              <select value={purBillType} onChange={(e) => setPurBillType(e.target.value as any)} className="input-field">
+                <option value="SUPPLY_ONLY">Supply Only Bill (0%)</option>
+                <option value="GST">GST Bill (Tax Invoice)</option>
+              </select>
               <select value={supplierId} onChange={(e) => setSupplierId(e.target.value)} className="input-field">
                 {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
@@ -456,10 +506,12 @@ export function CommercialPage() {
               <input type="number" step="0.1" value={purQtyKg} onChange={(e) => setPurQtyKg(e.target.value)} placeholder="Qty kg" className="input-field" required />
               <input type="number" step="0.01" value={purRate} onChange={(e) => setPurRate(e.target.value)} placeholder="Rate ₹/kg" className="input-field" required />
               <input type="number" step="0.01" value={purFreight} onChange={(e) => setPurFreight(e.target.value)} placeholder="Freight ₹" className="input-field" />
-              <select value={purTaxId} onChange={(e) => setPurTaxId(e.target.value)} className="input-field">
-                {catalog.taxes.map((tx: any) => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
-              </select>
-              <button type="submit" className="btn-primary lg:col-span-3">Save & Post Purchase</button>
+              {purBillType === 'GST' && (
+                <select value={purTaxId} onChange={(e) => setPurTaxId(e.target.value)} className="input-field">
+                  {catalog.taxes.map((tx: any) => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
+                </select>
+              )}
+              <button type="submit" className="btn-primary lg:col-span-2">Save & Generate Bill</button>
             </form>
           )}
 
@@ -482,6 +534,9 @@ export function CommercialPage() {
                     <td className="p-3 text-right font-bold">₹{Number(p.total_amount).toLocaleString('en-IN')}</td>
                     <td className="p-3"><StatusBadge status={p.status} /></td>
                     <td className="p-3 flex gap-1">
+                      <button onClick={() => openDocBill('purchases', p.id)} className="btn-amber !min-h-[32px] !py-1 !px-2 text-xs">
+                        <FileText className="w-3.5 h-3.5" /> Bill
+                      </button>
                       {hasPerm('accounting.view') && (
                         <button onClick={() => inspectJournals(p.id)} className="btn-secondary !min-h-[32px] !py-1 !px-2 text-xs">
                           <BookOpen className="w-3.5 h-3.5" /> Journal
@@ -652,6 +707,9 @@ export function CommercialPage() {
             ))}
           </div>
         </div>
+      )}
+      {activeBill && (
+        <BillPreviewModal bill={activeBill} business={business} onClose={() => setActiveBill(null)} />
       )}
     </div>
   );
