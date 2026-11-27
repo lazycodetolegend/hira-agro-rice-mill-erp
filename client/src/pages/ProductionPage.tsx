@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Factory, Plus, PackagePlus } from 'lucide-react';
-import { apiFetch } from '../api/client';
+import { apiFetch, isNetworkError } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { useSync } from '../context/SyncContext';
 import { StatusBadge } from '../components/StatusBadge';
 
 export function ProductionPage() {
   const { hasPerm } = useAuth();
+  const { isOnline, outbox, queueOfflineOp } = useSync();
   const [batches, setBatches] = useState<any[]>([]);
   const [lots, setLots] = useState<any[]>([]);
   const [catalog, setCatalog] = useState<any>({ products: [], warehouses: [] });
@@ -37,11 +39,22 @@ export function ProductionPage() {
 
   const loadData = async () => {
     const [b, l, cat] = await Promise.all([
-      apiFetch<any[]>('/production'),
-      apiFetch<any[]>('/lots'),
-      apiFetch<any>('/masters/catalog'),
+      apiFetch<any[]>('/production').catch(() => []),
+      apiFetch<any[]>('/lots').catch(() => []),
+      apiFetch<any>('/masters/catalog').catch(() => ({ products: [], warehouses: [] })),
     ]);
-    setBatches(b);
+    const pendingBatches = outbox
+      .filter((o) => o.entityType === 'PRODUCTION_DRAFT' && o.syncStatus !== 'Synced')
+      .map((o) => ({
+        id: `offline-${o.idempotencyKey}`,
+        batch_number: `OFF-PRD-${o.idempotencyKey.slice(0, 5).toUpperCase()}`,
+        start_date: o.payload.startDate,
+        machine_line: o.payload.machineLine,
+        total_input_kg: o.payload.inputs?.[0]?.qtyKg || 0,
+        status: `Offline (${o.syncStatus})`,
+        created_at: o.offlineCreatedAt,
+      }));
+    setBatches([...pendingBatches, ...b]);
     setLots(l);
     setCatalog(cat);
     if (!lotId && l.length) setLotId(l[0].id);
@@ -55,7 +68,7 @@ export function ProductionPage() {
 
   useEffect(() => {
     loadData().catch(() => {});
-  }, []);
+  }, [isOnline, outbox.length]);
 
   const totalOut =
     Number(riceKg || 0) +
@@ -70,32 +83,44 @@ export function ProductionPage() {
     e.preventDefault();
     setError('');
     setMsg('');
+    const payload = {
+      startDate: new Date().toISOString().slice(0, 10),
+      machineLine,
+      warehouseId,
+      inputs: [{ lotId, qtyKg: Number(inputQtyKg) }],
+      outputs: [
+        { productId: riceProductId, outputCategory: 'FINISHED_RICE', qtyKg: Number(riceKg), warehouseId },
+        { productId: brokenProductId, outputCategory: 'BROKEN_RICE', qtyKg: Number(brokenKg), warehouseId },
+        { productId: branProductId, outputCategory: 'BRAN', qtyKg: Number(branKg), warehouseId },
+        { productId: huskProductId, outputCategory: 'HUSK', qtyKg: Number(huskKg), warehouseId },
+        { productId: riceProductId, outputCategory: 'WASTE', qtyKg: Number(wasteKg), warehouseId },
+      ],
+      approvedVarianceKg: Number(approvedVarianceKg || 0),
+      varianceReason,
+      approveVariance,
+      completeNow: true,
+    };
+    const saveOfflineProd = async () => {
+      await queueOfflineOp('PRODUCTION_DRAFT', 'CREATE_PRODUCTION_OFFLINE', payload);
+      setMsg('Production batch saved OFFLINE. Will auto-sync & post stock/accounts when Wi-Fi returns.');
+      setShowCreate(false);
+      await loadData();
+    };
     try {
+      if (!isOnline) {
+        await saveOfflineProd();
+        return;
+      }
       const created = await apiFetch('/production', {
         method: 'POST',
-        body: JSON.stringify({
-          startDate: new Date().toISOString().slice(0, 10),
-          machineLine,
-          warehouseId,
-          inputs: [{ lotId, qtyKg: Number(inputQtyKg) }],
-          outputs: [
-            { productId: riceProductId, outputCategory: 'FINISHED_RICE', qtyKg: Number(riceKg), warehouseId },
-            { productId: brokenProductId, outputCategory: 'BROKEN_RICE', qtyKg: Number(brokenKg), warehouseId },
-            { productId: branProductId, outputCategory: 'BRAN', qtyKg: Number(branKg), warehouseId },
-            { productId: huskProductId, outputCategory: 'HUSK', qtyKg: Number(huskKg), warehouseId },
-            { productId: riceProductId, outputCategory: 'WASTE', qtyKg: Number(wasteKg), warehouseId },
-          ],
-          approvedVarianceKg: Number(approvedVarianceKg || 0),
-          varianceReason,
-          approveVariance,
-          completeNow: true,
-        }),
+        body: JSON.stringify(payload),
       });
       setMsg(`Production batch ${created.batch_number} completed & posted to stock/accounts.`);
       setShowCreate(false);
       await loadData();
     } catch (err: any) {
-      setError(err.message);
+      if (isNetworkError(err)) await saveOfflineProd();
+      else setError(err.message);
     }
   };
 

@@ -1,12 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { Plus, RotateCcw, BookOpen, FileText } from 'lucide-react';
-import { apiFetch } from '../api/client';
+import { apiFetch, isNetworkError } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { useSync } from '../context/SyncContext';
+import { listOfflineBags } from '../offline/db';
 import { StatusBadge } from '../components/StatusBadge';
 import { BillPreviewModal, type BillData } from '../components/BillPreviewModal';
 
 export function CommercialPage() {
   const { hasPerm, business } = useAuth();
+  const { isOnline, outbox, queueOfflineOp } = useSync();
   const [tab, setTab] = useState<'SALES' | 'PURCHASES' | 'EXPENSES' | 'PAYMENTS'>('SALES');
 
   const [sales, setSales] = useState<any[]>([]);
@@ -72,24 +75,97 @@ export function CommercialPage() {
 
   const loadData = async () => {
     const [cat, sups, custs, bagsRes, lotsRes] = await Promise.all([
-      apiFetch<any>('/masters/catalog'),
-      apiFetch<any[]>('/masters/suppliers'),
-      apiFetch<any[]>('/masters/customers'),
-      apiFetch<any[]>('/bags'),
-      apiFetch<any[]>('/lots'),
+      apiFetch<any>('/masters/catalog').catch(() => ({ products: [], warehouses: [], taxes: [] })),
+      apiFetch<any[]>('/masters/suppliers').catch(() => []),
+      apiFetch<any[]>('/masters/customers').catch(() => []),
+      apiFetch<any[]>('/bags').catch(() => listOfflineBags()),
+      apiFetch<any[]>('/lots').catch(() => []),
     ]);
     setCatalog(cat);
     setSuppliers(sups);
     setCustomers(custs);
-    setSealedBags(bagsRes.filter((b) => ['Sealed', 'In Stock', 'Generated', 'Printed'].includes(b.current_status)));
+    setSealedBags(bagsRes.filter((b: any) => ['Sealed', 'In Stock', 'Generated', 'Printed'].includes(b.current_status)));
     setLots(lotsRes);
 
-    if (hasPerm('sales.view')) setSales(await apiFetch('/sales'));
-    if (hasPerm('purchases.view')) setPurchases(await apiFetch('/purchases'));
-    if (hasPerm('expenses.view')) setExpenses(await apiFetch('/expenses'));
-    if (hasPerm('payments.view')) setPayments(await apiFetch('/payments'));
+    const pendingSales = outbox
+      .filter((o) => o.entityType === 'SALE_DRAFT' && o.syncStatus !== 'Synced')
+      .map((o) => {
+        const cust = custs.find((c: any) => c.id === o.payload.customerId);
+        return {
+          id: `offline-${o.idempotencyKey}`,
+          doc_number: `OFF-SAL-${o.idempotencyKey.slice(0, 5).toUpperCase()}`,
+          doc_type: o.payload.docType || 'INVOICE',
+          bill_type: o.payload.billType || 'SUPPLY_ONLY',
+          doc_date: o.payload.docDate,
+          customer_id: o.payload.customerId,
+          customer_name: cust?.name || 'Customer',
+          customer_phone: cust?.phone,
+          customer_gstin: cust?.gstin,
+          subtotal: o.payload._offlineSummary?.subtotal || 0,
+          tax_amount: o.payload._offlineSummary?.taxAmount || 0,
+          total_amount: o.payload._offlineSummary?.totalAmount || 0,
+          received_amount: 0,
+          status: `Offline (${o.syncStatus})`,
+          _offlineLines: o.payload._offlineSummary?.lines || [],
+        };
+      });
+
+    const pendingPurchases = outbox
+      .filter((o) => o.entityType === 'PURCHASE_DRAFT' && o.syncStatus !== 'Synced')
+      .map((o) => {
+        const sup = sups.find((s: any) => s.id === o.payload.supplierId);
+        return {
+          id: `offline-${o.idempotencyKey}`,
+          doc_number: `OFF-PUR-${o.idempotencyKey.slice(0, 5).toUpperCase()}`,
+          doc_type: o.payload.docType || 'INVOICE',
+          bill_type: o.payload.billType || 'SUPPLY_ONLY',
+          doc_date: o.payload.docDate,
+          supplier_id: o.payload.supplierId,
+          supplier_name: sup?.name || 'Supplier',
+          supplier_phone: sup?.phone,
+          supplier_gstin: sup?.gstin,
+          subtotal: o.payload._offlineSummary?.subtotal || 0,
+          freight_amount: o.payload.freightAmount || 0,
+          tax_amount: o.payload._offlineSummary?.taxAmount || 0,
+          total_amount: o.payload._offlineSummary?.totalAmount || 0,
+          paid_amount: 0,
+          status: `Offline (${o.syncStatus})`,
+          _offlineLines: o.payload._offlineSummary?.lines || [],
+        };
+      });
+
+    const pendingExpenses = outbox
+      .filter((o) => o.entityType === 'EXPENSE_DRAFT' && o.syncStatus !== 'Synced')
+      .map((o) => ({
+        id: `offline-${o.idempotencyKey}`,
+        voucher_number: `OFF-EXP-${o.idempotencyKey.slice(0, 5).toUpperCase()}`,
+        voucher_type: o.payload.voucherType,
+        voucher_date: o.payload.voucherDate,
+        vendor_name: o.payload.vendorName || 'Vendor',
+        total_amount: o.payload.amount,
+        notes: o.payload.notes,
+        status: `Offline (${o.syncStatus})`,
+      }));
+
+    const pendingPayments = outbox
+      .filter((o) => o.entityType === 'PAYMENT_DRAFT' && o.syncStatus !== 'Synced')
+      .map((o) => ({
+        id: `offline-${o.idempotencyKey}`,
+        voucher_number: `OFF-PAY-${o.idempotencyKey.slice(0, 5).toUpperCase()}`,
+        voucher_type: o.payload.voucherType,
+        voucher_date: o.payload.voucherDate,
+        payment_method: o.payload.paymentMethod,
+        reference_no: o.payload.referenceNo,
+        amount: o.payload.amount,
+        status: `Offline (${o.syncStatus})`,
+      }));
+
+    if (hasPerm('sales.view')) setSales([...pendingSales, ...(await apiFetch('/sales').catch(() => []))]);
+    if (hasPerm('purchases.view')) setPurchases([...pendingPurchases, ...(await apiFetch('/purchases').catch(() => []))]);
+    if (hasPerm('expenses.view')) setExpenses([...pendingExpenses, ...(await apiFetch('/expenses').catch(() => []))]);
+    if (hasPerm('payments.view')) setPayments([...pendingPayments, ...(await apiFetch('/payments').catch(() => []))]);
     if (hasPerm('accounting.view')) {
-      const accounts = await apiFetch<any[]>('/accounting/coa');
+      const accounts = await apiFetch<any[]>('/accounting/coa').catch(() => []);
       setCoa(accounts);
       const cashOrBank = accounts.filter((a) => a.subtype === 'CASH' || a.subtype === 'BANK');
       const expAccs = accounts.filter((a) => a.account_type === 'EXPENSE');
@@ -111,7 +187,7 @@ export function CommercialPage() {
 
   useEffect(() => {
     loadData().catch(() => {});
-  }, []);
+  }, [isOnline, outbox.length]);
 
   const addBagByQrOrNumber = async () => {
     const q = bagScanInput.trim();
@@ -139,39 +215,90 @@ export function CommercialPage() {
     e.preventDefault();
     setError('');
     setMsg('');
-    try {
-      const lines =
-        saleMode === 'BAG'
-          ? sealedBags
-              .filter((b) => selectedBagIds.has(b.id))
-              .map((b) => ({
-                productId: b.product_id,
-                warehouseId: b.warehouse_id,
-                bagId: b.id,
-                qtyKg: b.net_weight_kg,
-                ratePerKg: Number(saleRate || b.sale_price_per_kg || 52),
-                taxId: saleTaxId || null,
-              }))
-          : [
-              {
-                productId: saleProductId,
-                warehouseId: saleWarehouseId,
-                qtyKg: Number(saleQtyKg),
-                ratePerKg: Number(saleRate),
-                taxId: saleTaxId || null,
-              },
-            ];
+    const lines =
+      saleMode === 'BAG'
+        ? sealedBags
+            .filter((b) => selectedBagIds.has(b.id))
+            .map((b) => ({
+              productId: b.product_id,
+              warehouseId: b.warehouse_id,
+              bagId: b.id,
+              qtyKg: b.net_weight_kg,
+              ratePerKg: Number(saleRate || b.sale_price_per_kg || 52),
+              taxId: saleTaxId || null,
+            }))
+        : [
+            {
+              productId: saleProductId,
+              warehouseId: saleWarehouseId,
+              qtyKg: Number(saleQtyKg),
+              ratePerKg: Number(saleRate),
+              taxId: saleTaxId || null,
+            },
+          ];
 
+    const payload = {
+      docType: saleDocType,
+      billType: saleBillType,
+      docDate: new Date().toISOString().slice(0, 10),
+      customerId,
+      lines: lines.map((l) => ({ ...l, taxId: saleBillType === 'GST' ? l.taxId : null })),
+      postImmediately: saleDocType === 'INVOICE' || saleDocType === 'RETURN',
+    };
+
+    const saveOfflineSale = async () => {
+      const cust = customers.find((c) => c.id === customerId);
+      const taxObj = catalog.taxes.find((t: any) => t.id === saleTaxId);
+      const taxPct = saleBillType === 'GST' ? Number(taxObj?.rate_percent || 0) : 0;
+      const computedLines = payload.lines.map((l) => {
+        const prod = catalog.products.find((p: any) => p.id === l.productId);
+        const sub = Number((l.qtyKg * l.ratePerKg).toFixed(2));
+        const tAmt = Number(((sub * taxPct) / 100).toFixed(2));
+        return {
+          description: prod?.name || 'Rice / Product',
+          hsnCode: prod?.hsn_code,
+          qtyKg: l.qtyKg,
+          ratePerKg: l.ratePerKg,
+          taxRatePercent: taxPct,
+          taxAmount: tAmt,
+          lineTotal: Number((sub + tAmt).toFixed(2)),
+          _sub: sub,
+        };
+      });
+      const subtotal = Number(computedLines.reduce((a, b) => a + b._sub, 0).toFixed(2));
+      const taxAmount = Number(computedLines.reduce((a, b) => a + b.taxAmount, 0).toFixed(2));
+      const totalAmount = Number((subtotal + taxAmount).toFixed(2));
+      const op = await queueOfflineOp('SALE_DRAFT', 'CREATE_SALE_OFFLINE', {
+        ...payload,
+        _offlineSummary: { subtotal, taxAmount, totalAmount, lines: computedLines },
+      });
+      setMsg(`Sales ${saleDocType} saved OFFLINE (₹${totalAmount}). Will auto-sync when online!`);
+      setShowSaleForm(false);
+      setSelectedBagIds(new Set());
+      await loadData();
+      setActiveBill({
+        docNumber: `OFF-SAL-${op.idempotencyKey.slice(0, 5).toUpperCase()}`,
+        docDate: payload.docDate,
+        billType: saleBillType,
+        partyLabel: 'Customer',
+        partyName: cust?.name || 'Customer',
+        partyPhone: cust?.phone,
+        partyGstin: cust?.gstin,
+        subtotal,
+        taxAmount,
+        totalAmount,
+        lines: computedLines,
+      });
+    };
+
+    try {
+      if (!isOnline) {
+        await saveOfflineSale();
+        return;
+      }
       const doc = await apiFetch('/sales', {
         method: 'POST',
-        body: JSON.stringify({
-          docType: saleDocType,
-          billType: saleBillType,
-          docDate: new Date().toISOString().slice(0, 10),
-          customerId,
-          lines: lines.map((l) => ({ ...l, taxId: saleBillType === 'GST' ? l.taxId : null })),
-          postImmediately: saleDocType === 'INVOICE' || saleDocType === 'RETURN',
-        }),
+        body: JSON.stringify(payload),
       });
       setMsg(`Sales ${doc.doc_type} ${doc.doc_number} saved (₹${doc.total_amount}).`);
       setShowSaleForm(false);
@@ -179,7 +306,11 @@ export function CommercialPage() {
       await loadData();
       openDocBill('sales', doc.id);
     } catch (err: any) {
-      setError(err.message);
+      if (isNetworkError(err)) {
+        await saveOfflineSale();
+      } else {
+        setError(err.message);
+      }
     }
   };
 
@@ -187,38 +318,112 @@ export function CommercialPage() {
     e.preventDefault();
     setError('');
     setMsg('');
+    const payload = {
+      docType: purDocType,
+      billType: purBillType,
+      docDate: new Date().toISOString().slice(0, 10),
+      supplierId,
+      lotId: purLotId || null,
+      freightAmount: Number(purFreight || 0),
+      lines: [
+        {
+          productId: purProductId,
+          warehouseId: purWarehouseId,
+          qtyKg: Number(purQtyKg),
+          ratePerKg: Number(purRate),
+          taxId: purBillType === 'GST' ? purTaxId || null : null,
+        },
+      ],
+      postImmediately: true,
+    };
+
+    const saveOfflinePurchase = async () => {
+      const sup = suppliers.find((s) => s.id === supplierId);
+      const prod = catalog.products.find((p: any) => p.id === purProductId);
+      const taxObj = catalog.taxes.find((t: any) => t.id === purTaxId);
+      const taxPct = purBillType === 'GST' ? Number(taxObj?.rate_percent || 0) : 0;
+      const subtotal = Number((Number(purQtyKg) * Number(purRate)).toFixed(2));
+      const taxAmount = Number(((subtotal * taxPct) / 100).toFixed(2));
+      const freight = Number(purFreight || 0);
+      const totalAmount = Number((subtotal + taxAmount + freight).toFixed(2));
+      const lines = [
+        {
+          description: prod?.name || 'Paddy / Raw Material',
+          hsnCode: prod?.hsn_code,
+          qtyKg: Number(purQtyKg),
+          ratePerKg: Number(purRate),
+          taxRatePercent: taxPct,
+          taxAmount,
+          lineTotal: Number((subtotal + taxAmount).toFixed(2)),
+        },
+      ];
+      const op = await queueOfflineOp('PURCHASE_DRAFT', 'CREATE_PURCHASE_OFFLINE', {
+        ...payload,
+        _offlineSummary: { subtotal, taxAmount, totalAmount, lines },
+      });
+      setMsg(`Purchase bill saved OFFLINE (₹${totalAmount}). Will auto-sync when online!`);
+      setShowPurchaseForm(false);
+      await loadData();
+      setActiveBill({
+        docNumber: `OFF-PUR-${op.idempotencyKey.slice(0, 5).toUpperCase()}`,
+        docDate: payload.docDate,
+        billType: purBillType,
+        partyLabel: 'Customer / Party',
+        partyName: sup?.name || 'Supplier',
+        partyPhone: sup?.phone,
+        partyGstin: sup?.gstin,
+        subtotal,
+        freightAmount: freight,
+        taxAmount,
+        totalAmount,
+        lines,
+      });
+    };
+
     try {
+      if (!isOnline) {
+        await saveOfflinePurchase();
+        return;
+      }
       const doc = await apiFetch('/purchases', {
         method: 'POST',
-        body: JSON.stringify({
-          docType: purDocType,
-          billType: purBillType,
-          docDate: new Date().toISOString().slice(0, 10),
-          supplierId,
-          lotId: purLotId || null,
-          freightAmount: Number(purFreight || 0),
-          lines: [
-            {
-              productId: purProductId,
-              warehouseId: purWarehouseId,
-              qtyKg: Number(purQtyKg),
-              ratePerKg: Number(purRate),
-              taxId: purBillType === 'GST' ? purTaxId || null : null,
-            },
-          ],
-          postImmediately: true,
-        }),
+        body: JSON.stringify(payload),
       });
       setMsg(`Purchase ${doc.doc_number} posted (₹${doc.total_amount}) with balanced accounting entry.`);
       setShowPurchaseForm(false);
       await loadData();
       openDocBill('purchases', doc.id);
     } catch (err: any) {
-      setError(err.message);
+      if (isNetworkError(err)) {
+        await saveOfflinePurchase();
+      } else {
+        setError(err.message);
+      }
     }
   };
 
   const openDocBill = async (kind: 'sales' | 'purchases', id: string) => {
+    if (id.startsWith('offline-')) {
+      const list = kind === 'sales' ? sales : purchases;
+      const doc = list.find((d) => d.id === id);
+      if (doc) {
+        setActiveBill({
+          docNumber: doc.doc_number,
+          docDate: doc.doc_date,
+          billType: doc.bill_type || 'SUPPLY_ONLY',
+          partyLabel: kind === 'sales' ? 'Customer' : 'Customer / Party',
+          partyName: kind === 'sales' ? doc.customer_name : doc.supplier_name,
+          partyPhone: kind === 'sales' ? doc.customer_phone : doc.supplier_phone,
+          partyGstin: kind === 'sales' ? doc.customer_gstin : doc.supplier_gstin,
+          subtotal: doc.subtotal,
+          freightAmount: doc.freight_amount || 0,
+          taxAmount: doc.tax_amount || 0,
+          totalAmount: doc.total_amount,
+          lines: doc._offlineLines || [],
+        });
+      }
+      return;
+    }
     const doc = await apiFetch<any>(`/${kind}/${id}`);
     setActiveBill({
       docNumber: doc.doc_number,
@@ -251,26 +456,38 @@ export function CommercialPage() {
     e.preventDefault();
     setError('');
     setMsg('');
+    const payload = {
+      voucherType: expType,
+      voucherDate: new Date().toISOString().slice(0, 10),
+      accountId: expAccId,
+      paymentAccountId: expPayAccId,
+      vendorName: expVendor,
+      paymentMethod: 'CASH',
+      amount: Number(expAmount),
+      notes: expNotes,
+      postImmediately: true,
+    };
+    const saveOfflineExp = async () => {
+      await queueOfflineOp('EXPENSE_DRAFT', 'CREATE_EXPENSE_OFFLINE', payload);
+      setMsg(`${expType} voucher saved OFFLINE (₹${payload.amount}). Will sync when online.`);
+      setShowExpForm(false);
+      await loadData();
+    };
     try {
+      if (!isOnline) {
+        await saveOfflineExp();
+        return;
+      }
       const doc = await apiFetch('/expenses', {
         method: 'POST',
-        body: JSON.stringify({
-          voucherType: expType,
-          voucherDate: new Date().toISOString().slice(0, 10),
-          accountId: expAccId,
-          paymentAccountId: expPayAccId,
-          vendorName: expVendor,
-          paymentMethod: 'CASH',
-          amount: Number(expAmount),
-          notes: expNotes,
-          postImmediately: true,
-        }),
+        body: JSON.stringify(payload),
       });
       setMsg(`${doc.voucher_type} ${doc.voucher_number} posted (₹${doc.total_amount}).`);
       setShowExpForm(false);
       await loadData();
     } catch (err: any) {
-      setError(err.message);
+      if (isNetworkError(err)) await saveOfflineExp();
+      else setError(err.message);
     }
   };
 
@@ -278,27 +495,39 @@ export function CommercialPage() {
     e.preventDefault();
     setError('');
     setMsg('');
+    const payload = {
+      voucherType: payType,
+      voucherDate: new Date().toISOString().slice(0, 10),
+      partyType: payType === 'RECEIPT' ? 'CUSTOMER' : payType === 'PAYMENT' ? 'SUPPLIER' : 'NONE',
+      partyId: payType === 'CONTRA' ? null : payPartyId || (payType === 'RECEIPT' ? customers[0]?.id : suppliers[0]?.id),
+      paymentAccountId: payAccId,
+      targetAccountId: payType === 'CONTRA' ? payTargetAccId : null,
+      paymentMethod: payMethod,
+      referenceNo: payRef,
+      amount: Number(payAmount),
+      postImmediately: true,
+    };
+    const saveOfflinePay = async () => {
+      await queueOfflineOp('PAYMENT_DRAFT', 'CREATE_PAYMENT_OFFLINE', payload);
+      setMsg(`${payType} voucher saved OFFLINE (₹${payload.amount}). Will sync when online.`);
+      setShowPayForm(false);
+      await loadData();
+    };
     try {
+      if (!isOnline) {
+        await saveOfflinePay();
+        return;
+      }
       const doc = await apiFetch('/payments', {
         method: 'POST',
-        body: JSON.stringify({
-          voucherType: payType,
-          voucherDate: new Date().toISOString().slice(0, 10),
-          partyType: payType === 'RECEIPT' ? 'CUSTOMER' : payType === 'PAYMENT' ? 'SUPPLIER' : 'NONE',
-          partyId: payType === 'CONTRA' ? null : payPartyId || (payType === 'RECEIPT' ? customers[0]?.id : suppliers[0]?.id),
-          paymentAccountId: payAccId,
-          targetAccountId: payType === 'CONTRA' ? payTargetAccId : null,
-          paymentMethod: payMethod,
-          referenceNo: payRef,
-          amount: Number(payAmount),
-          postImmediately: true,
-        }),
+        body: JSON.stringify(payload),
       });
       setMsg(`${doc.voucher_type} ${doc.voucher_number} posted (₹${doc.amount}).`);
       setShowPayForm(false);
       await loadData();
     } catch (err: any) {
-      setError(err.message);
+      if (isNetworkError(err)) await saveOfflinePay();
+      else setError(err.message);
     }
   };
 

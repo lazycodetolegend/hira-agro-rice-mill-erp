@@ -4,6 +4,7 @@ import {
   saveEncryptedSession,
   loadEncryptedSession,
   clearOfflineSession,
+  clearApiCache,
   hasOfflinePin,
   verifyOfflinePin,
 } from '../offline/db';
@@ -59,6 +60,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const applyAuthenticatedResponse = useCallback(
     async (data: any) => {
       setAuthToken(data.token);
+      if (data.business?.id || data.user?.id) {
+        localStorage.setItem('rm_scope_id', data.business?.id || data.user?.id);
+      }
       setUser(data.user);
       setBusiness(data.business);
       setDeviceId(data.deviceId);
@@ -195,7 +199,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await apiFetch('/auth/logout', { method: 'POST' }).catch(() => {});
     }
     setAuthToken(null);
+    localStorage.removeItem('rm_scope_id');
     await clearOfflineSession();
+    await clearApiCache();
     setHasCachedSession(false);
     setUser(null);
     setBusiness(null);

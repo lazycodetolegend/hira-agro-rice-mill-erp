@@ -1,10 +1,26 @@
 {
+  "id": "/",
   "name": "Hira Agro Industry — Rice Mill ERP",
-  "short_name": "Hira Agro",
+  "short_name": "Hira Agro ERP",
+  "description": "Offline-first QR bag tracking, weighbridge billing & double-entry rice mill ERP.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#FAF7F0",
   "theme_color": "#1B4D3E",
   "orientation": "any",
-  "icons": []
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
 }

@@ -664,5 +664,109 @@ test('Rice Mill ERP End-to-End Acceptance Criteria', async (t) => {
     }
   });
 
+  await t.test('12. Full Offline Sync Engine: Pull taxes + Push Sale/Purchase/Expense/Payment + RBAC guard', async () => {
+    const snap = await api('/sync/pull', {}, adminToken);
+    assert.equal(snap.status, 200);
+    assert.ok(Array.isArray(snap.json.taxes));
+
+    const rice = catalog.products.find((p: any) => p.material_type === 'RICE');
+    const whFg = catalog.warehouses[catalog.warehouses.length - 1];
+    const tax0 = catalog.taxes[0];
+    const coa = (await api('/accounting/coa', {}, adminToken)).json;
+    const cashAcc = coa.find((a: any) => a.code === '1010');
+    const expAcc = coa.find((a: any) => a.code === '5120');
+
+    const opPrefix = 'off-test-' + Date.now();
+    const ops = [
+      {
+        idempotencyKey: opPrefix + '-pur',
+        entityType: 'PURCHASE_DRAFT',
+        action: 'CREATE_PURCHASE_OFFLINE',
+        offlineCreatedAt: '2026-11-27T10:00:00Z',
+        payload: {
+          docType: 'INVOICE',
+          billType: 'SUPPLY_ONLY',
+          docDate: '2026-11-27',
+          supplierId: suppliers[0].id,
+          lines: [{ productId: rice.id, warehouseId: whFg.id, qtyKg: 100, ratePerKg: 30, taxId: null }],
+          postImmediately: true,
+        },
+      },
+      {
+        idempotencyKey: opPrefix + '-sal',
+        entityType: 'SALE_DRAFT',
+        action: 'CREATE_SALE_OFFLINE',
+        offlineCreatedAt: '2026-11-27T10:05:00Z',
+        payload: {
+          docType: 'INVOICE',
+          billType: 'SUPPLY_ONLY',
+          docDate: '2026-11-27',
+          customerId: customers[0].id,
+          lines: [{ productId: rice.id, warehouseId: whFg.id, qtyKg: 40, ratePerKg: 50, taxId: tax0?.id || null }],
+          postImmediately: true,
+        },
+      },
+      {
+        idempotencyKey: opPrefix + '-exp',
+        entityType: 'EXPENSE_DRAFT',
+        action: 'CREATE_EXPENSE_OFFLINE',
+        offlineCreatedAt: '2026-11-27T10:10:00Z',
+        payload: {
+          voucherType: 'EXPENSE',
+          voucherDate: '2026-11-27',
+          accountId: expAcc.id,
+          paymentAccountId: cashAcc.id,
+          vendorName: 'Offline Mill Labour',
+          paymentMethod: 'CASH',
+          amount: 500,
+          postImmediately: true,
+        },
+      },
+      {
+        idempotencyKey: opPrefix + '-pay',
+        entityType: 'PAYMENT_DRAFT',
+        action: 'CREATE_PAYMENT_OFFLINE',
+        offlineCreatedAt: '2026-11-27T10:15:00Z',
+        payload: {
+          voucherType: 'RECEIPT',
+          voucherDate: '2026-11-27',
+          partyType: 'CUSTOMER',
+          partyId: customers[0].id,
+          paymentAccountId: cashAcc.id,
+          paymentMethod: 'CASH',
+          amount: 1000,
+          postImmediately: true,
+        },
+      },
+    ];
+
+    const push1 = await api('/sync/push', { method: 'POST', body: JSON.stringify({ operations: ops }) }, adminToken);
+    assert.equal(push1.status, 200);
+    assert.equal(push1.json.results.filter((r: any) => r.status === 'APPLIED').length, 4);
+
+    // Sending identical keys again must return DUPLICATE
+    const push2 = await api('/sync/push', { method: 'POST', body: JSON.stringify({ operations: ops }) }, adminToken);
+    assert.equal(push2.status, 200);
+    assert.equal(push2.json.results.filter((r: any) => r.status === 'DUPLICATE').length, 4);
+
+    // Operator/Auditor without sales.manage cannot smuggle SALE_DRAFT via /sync/push
+    const opPush = await api('/sync/push', {
+      method: 'POST',
+      body: JSON.stringify({
+        operations: [
+          {
+            idempotencyKey: opPrefix + '-unauth',
+            entityType: 'SALE_DRAFT',
+            action: 'CREATE_SALE_OFFLINE',
+            offlineCreatedAt: '2026-11-27T10:20:00Z',
+            payload: ops[1].payload,
+          },
+        ],
+      }),
+    }, operatorToken);
+    assert.equal(opPush.status, 200);
+    assert.equal(opPush.json.results[0].status, 'REJECTED');
+  });
+
   server.close();
 });

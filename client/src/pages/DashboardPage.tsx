@@ -13,9 +13,7 @@ export function DashboardPage({ onNavigate }: { onNavigate: (p: PageId) => void 
   const [data, setData] = useState<any | null>(null);
 
   useEffect(() => {
-    if (isOnline) {
-      apiFetch('/dashboard').then(setData).catch(() => {});
-    }
+    apiFetch('/dashboard').then(setData).catch(() => {});
   }, [isOnline]);
 
   const fmtInr = (n: number | null | undefined) =>

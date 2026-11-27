@@ -20,6 +20,8 @@ import {
   Wifi,
   WifiOff,
   ShieldCheck,
+  Smartphone,
+  Download,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useI18n } from '../context/I18nContext';
@@ -57,6 +59,38 @@ export function Layout({ activePage, onNavigate, children }: Props) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any | null>(null);
+  const [installPrompt, setInstallPrompt] = useState<any>(null);
+  const [showIosInstallTip, setShowIosInstallTip] = useState(false);
+  const [installDismissed, setInstallDismissed] = useState(() => localStorage.getItem('rm_install_dismissed') === '1');
+  const [isStandalone] = useState(
+    () =>
+      window.matchMedia?.('(display-mode: standalone)').matches ||
+      (navigator as any).standalone === true
+  );
+  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+
+  React.useEffect(() => {
+    const handler = (e: Event) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  const triggerInstall = async () => {
+    if (installPrompt) {
+      await installPrompt.prompt();
+      const choice = await installPrompt.userChoice.catch(() => ({ outcome: 'dismissed' }));
+      if (choice?.outcome === 'accepted') {
+        setInstallPrompt(null);
+      }
+      return;
+    }
+    if (isIos) {
+      setShowIosInstallTip(true);
+    }
+  };
 
   const allNavItems: Array<{ id: PageId; label: string; icon: any; show: boolean }> = [
     { id: 'dashboard', label: t('nav.dashboard'), icon: LayoutDashboard, show: true },
@@ -269,6 +303,18 @@ export function Layout({ activePage, onNavigate, children }: Props) {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Install App Button */}
+            {!isStandalone && (installPrompt || isIos) && (
+              <button
+                onClick={triggerInstall}
+                className="px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 bg-[#1B4D3E] text-white shadow-sm hover:bg-[#153d31]"
+                title="Install Hira Agro ERP on your phone"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Install App</span>
+              </button>
+            )}
+
             {/* Sync / Online Pill */}
             <button
               onClick={() => (pendingCount > 0 ? syncNow() : onNavigate('sync'))}
@@ -308,7 +354,55 @@ export function Layout({ activePage, onNavigate, children }: Props) {
           </div>
         </header>
 
-        <main className="flex-1 p-3 sm:p-6 max-w-7xl w-full mx-auto">{children}</main>
+        <main className="flex-1 p-3 sm:p-6 max-w-7xl w-full mx-auto">
+          {!isStandalone && !installDismissed && (installPrompt || isIos) && (
+            <div className="mb-4 p-3 rounded-2xl bg-[#1B4D3E] text-white flex flex-wrap items-center justify-between gap-2 text-xs shadow-sm no-print">
+              <div className="flex items-center gap-2.5">
+                <Smartphone className="w-5 h-5 text-amber-300 shrink-0" />
+                <div>
+                  <div className="font-bold text-sm">Install Hira Agro App for Offline Mill Use</div>
+                  <div className="text-emerald-100">
+                    {isIos && !installPrompt
+                      ? 'On iPhone/iPad: tap Share (⬆️) in Safari, then tap "Add to Home Screen".'
+                      : 'Install on your phone so billing, QR scanning, and truck entries work with zero internet.'}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {installPrompt && (
+                  <button
+                    onClick={triggerInstall}
+                    className="px-3 py-1.5 rounded-xl bg-[#D97706] text-white font-bold hover:bg-amber-600"
+                  >
+                    Install Now
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    localStorage.setItem('rm_install_dismissed', '1');
+                    setInstallDismissed(true);
+                  }}
+                  className="px-2 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 font-semibold"
+                >
+                  Hide
+                </button>
+              </div>
+            </div>
+          )}
+
+          {showIosInstallTip && (
+            <div className="mb-4 p-3 rounded-2xl bg-amber-50 border border-amber-300 text-amber-950 text-xs flex justify-between items-center gap-2 no-print">
+              <span>
+                <strong>iPhone / iPad Install:</strong> Tap the Safari <strong>Share</strong> icon at the bottom of your screen, scroll down, and tap <strong>Add to Home Screen</strong>.
+              </span>
+              <button onClick={() => setShowIosInstallTip(false)} className="font-bold underline shrink-0">
+                OK
+              </button>
+            </div>
+          )}
+
+          {children}
+        </main>
       </div>
 
       {/* Mobile Bottom Quick Bar */}

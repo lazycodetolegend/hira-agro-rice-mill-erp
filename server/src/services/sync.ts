@@ -3,16 +3,46 @@ import { newId } from '../utils/crypto.js';
 import { createTruckAndLot } from './lots.js';
 import { createBags, transitionBagStatus } from './bags.js';
 import { recordInventoryMovement } from './inventory.js';
+import { createOrCompleteProductionBatch } from './production.js';
+import {
+  createSalesDocument,
+  createPurchaseDocument,
+  createExpenseOrIncome,
+  createPaymentOrReceipt,
+} from './commercial.js';
+import { hasPermission } from '../middleware/auth.js';
+import { PERMISSIONS } from '../middleware/rbac.js';
 import { recordAudit } from '../middleware/audit.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 export interface OfflineOperation {
   idempotencyKey: string;
-  entityType: 'LOT_DRAFT' | 'BAGS_CREATE' | 'BAG_TRANSITION' | 'STOCK_COUNT' | 'PRODUCTION_DRAFT';
+  entityType:
+    | 'LOT_DRAFT'
+    | 'BAGS_CREATE'
+    | 'BAG_TRANSITION'
+    | 'STOCK_COUNT'
+    | 'PRODUCTION_DRAFT'
+    | 'SALE_DRAFT'
+    | 'PURCHASE_DRAFT'
+    | 'EXPENSE_DRAFT'
+    | 'PAYMENT_DRAFT';
   action: string;
   offlineCreatedAt: string;
   payload: any;
 }
+
+const SYNC_REQUIRED_PERMISSION: Record<OfflineOperation['entityType'], string> = {
+  LOT_DRAFT: PERMISSIONS.LOTS_MANAGE,
+  BAGS_CREATE: PERMISSIONS.BAGS_CREATE,
+  BAG_TRANSITION: PERMISSIONS.BAGS_SCAN,
+  STOCK_COUNT: PERMISSIONS.INVENTORY_ADJUST,
+  PRODUCTION_DRAFT: PERMISSIONS.PRODUCTION_MANAGE,
+  SALE_DRAFT: PERMISSIONS.SALES_MANAGE,
+  PURCHASE_DRAFT: PERMISSIONS.PURCHASES_MANAGE,
+  EXPENSE_DRAFT: PERMISSIONS.EXPENSES_MANAGE,
+  PAYMENT_DRAFT: PERMISSIONS.PAYMENTS_MANAGE,
+};
 
 export function processSyncPush(ops: OfflineOperation[], auth: AuthContext) {
   const results: Array<{
@@ -41,6 +71,11 @@ export function processSyncPush(ops: OfflineOperation[], auth: AuthContext) {
     const syncedAt = nowIso();
 
     try {
+      const requiredPerm = SYNC_REQUIRED_PERMISSION[op.entityType];
+      if (requiredPerm && !hasPermission(auth, requiredPerm)) {
+        throw new Error(`Permission denied for offline operation ${op.entityType} (${requiredPerm}).`);
+      }
+
       let appliedResult: any = null;
 
       if (op.entityType === 'BAGS_CREATE') {
@@ -144,6 +179,41 @@ export function processSyncPush(ops: OfflineOperation[], auth: AuthContext) {
           note: op.payload.note || 'Offline physical stock check',
           occurredAt: op.offlineCreatedAt,
           userId: auth.userId,
+        });
+      } else if (op.entityType === 'PRODUCTION_DRAFT') {
+        appliedResult = createOrCompleteProductionBatch({
+          ...op.payload,
+          businessId: auth.businessId,
+          userId: auth.userId,
+          deviceId: auth.deviceId,
+        });
+      } else if (op.entityType === 'SALE_DRAFT') {
+        appliedResult = createSalesDocument({
+          ...op.payload,
+          businessId: auth.businessId,
+          userId: auth.userId,
+          deviceId: auth.deviceId,
+        });
+      } else if (op.entityType === 'PURCHASE_DRAFT') {
+        appliedResult = createPurchaseDocument({
+          ...op.payload,
+          businessId: auth.businessId,
+          userId: auth.userId,
+          deviceId: auth.deviceId,
+        });
+      } else if (op.entityType === 'EXPENSE_DRAFT') {
+        appliedResult = createExpenseOrIncome({
+          ...op.payload,
+          businessId: auth.businessId,
+          userId: auth.userId,
+          deviceId: auth.deviceId,
+        });
+      } else if (op.entityType === 'PAYMENT_DRAFT') {
+        appliedResult = createPaymentOrReceipt({
+          ...op.payload,
+          businessId: auth.businessId,
+          userId: auth.userId,
+          deviceId: auth.deviceId,
         });
       } else {
         throw new Error(`Unsupported offline sync entityType: ${op.entityType}`);
@@ -315,6 +385,7 @@ export function getSyncSnapshot(businessId: string) {
     locations: queryAll('SELECT * FROM warehouse_locations WHERE business_id = ? AND is_active = 1', [businessId]),
     suppliers: queryAll('SELECT * FROM suppliers WHERE business_id = ? AND is_active = 1', [businessId]),
     customers: queryAll('SELECT * FROM customers WHERE business_id = ? AND is_active = 1', [businessId]),
+    taxes: queryAll('SELECT * FROM tax_settings WHERE business_id = ? AND is_active = 1', [businessId]),
     lots: queryAll('SELECT * FROM inbound_lots WHERE business_id = ? ORDER BY created_at DESC LIMIT 200', [businessId]),
     bags: queryAll(
       `SELECT b.*, p.name AS product_name, p.material_type, w.name AS warehouse_name, l.lot_number

@@ -1,11 +1,20 @@
 import { openDB, type IDBPDatabase } from 'idb';
 
 const DB_NAME = 'rice_mill_offline_v1';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export interface OutboxOp {
   idempotencyKey: string;
-  entityType: 'LOT_DRAFT' | 'BAGS_CREATE' | 'BAG_TRANSITION' | 'STOCK_COUNT' | 'PRODUCTION_DRAFT';
+  entityType:
+    | 'LOT_DRAFT'
+    | 'BAGS_CREATE'
+    | 'BAG_TRANSITION'
+    | 'STOCK_COUNT'
+    | 'PRODUCTION_DRAFT'
+    | 'SALE_DRAFT'
+    | 'PURCHASE_DRAFT'
+    | 'EXPENSE_DRAFT'
+    | 'PAYMENT_DRAFT';
   action: string;
   offlineCreatedAt: string;
   payload: any;
@@ -25,6 +34,9 @@ export function getOfflineDb() {
         }
         if (!db.objectStoreNames.contains('cache')) {
           db.createObjectStore('cache');
+        }
+        if (!db.objectStoreNames.contains('api_cache')) {
+          db.createObjectStore('api_cache');
         }
         if (!db.objectStoreNames.contains('bags')) {
           const bagStore = db.createObjectStore('bags', { keyPath: 'id' });
@@ -94,6 +106,36 @@ export async function loadEncryptedSession(): Promise<any | null> {
 export async function clearOfflineSession() {
   const db = await getOfflineDb();
   await db.delete('kv', 'session');
+}
+
+export async function saveApiCache(key: string, data: any) {
+  try {
+    const db = await getOfflineDb();
+    await db.put('api_cache', { savedAt: Date.now(), data }, key);
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export async function loadApiCache<T = any>(key: string): Promise<T | null> {
+  try {
+    const db = await getOfflineDb();
+    const rec = await db.get('api_cache', key);
+    return rec?.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearApiCache() {
+  try {
+    const db = await getOfflineDb();
+    await db.clear('api_cache');
+    await db.clear('cache');
+    await db.clear('bags');
+  } catch {
+    // ignore
+  }
 }
 
 async function hashPinWithSalt(pin: string, salt: string): Promise<string> {

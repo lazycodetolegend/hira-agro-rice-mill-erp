@@ -1,3 +1,5 @@
+import { loadApiCache, saveApiCache } from '../offline/db';
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 
 let authToken: string | null = localStorage.getItem('rm_token');
@@ -50,7 +52,37 @@ export class ApiError extends Error {
   }
 }
 
+export function isNetworkError(err: unknown): boolean {
+  if (err instanceof ApiError) return false;
+  if (!navigator.onLine) return true;
+  if (err instanceof DOMException && err.name === 'AbortError') return true;
+  if (err instanceof TypeError) return true;
+  const msg = String((err as any)?.message || '').toLowerCase();
+  return msg.includes('failed to fetch') || msg.includes('network') || msg.includes('abort');
+}
+
+function getCacheKey(path: string): string {
+  const scope = localStorage.getItem('rm_scope_id') || 'default';
+  return `${scope}:${path}`;
+}
+
+function isCacheableGet(path: string, method: string): boolean {
+  return method.toUpperCase() === 'GET' && !path.startsWith('/auth/') && !path.startsWith('/search');
+}
+
+function notifyNetworkReachable(reachable: boolean) {
+  window.dispatchEvent(new CustomEvent('rm:network-status', { detail: { reachable } }));
+}
+
 export async function apiFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const method = (options.method || 'GET').toUpperCase();
+  const cacheable = isCacheableGet(path, method);
+
+  if (cacheable && !navigator.onLine) {
+    const cached = await loadApiCache<T>(getCacheKey(path));
+    if (cached !== null) return cached;
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
@@ -59,17 +91,46 @@ export async function apiFetch<T = any>(path: string, options: RequestInit = {})
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  const text = await res.text();
-  let data: any = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { error: text };
-  }
+  const controller = !options.signal ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 12000) : null;
 
-  if (!res.ok) {
-    throw new ApiError(data?.error || `Request failed (${res.status})`, res.status, data?.code);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      method,
+      headers,
+      signal: options.signal ?? controller?.signal,
+    });
+    if (timer) clearTimeout(timer);
+
+    notifyNetworkReachable(true);
+
+    const text = await res.text();
+    let data: any = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { error: text };
+    }
+
+    if (!res.ok) {
+      throw new ApiError(data?.error || `Request failed (${res.status})`, res.status, data?.code);
+    }
+
+    if (cacheable) {
+      await saveApiCache(getCacheKey(path), data);
+    }
+
+    return data as T;
+  } catch (err) {
+    if (timer) clearTimeout(timer);
+    if (isNetworkError(err)) {
+      notifyNetworkReachable(false);
+      if (cacheable) {
+        const cached = await loadApiCache<T>(getCacheKey(path));
+        if (cached !== null) return cached;
+      }
+    }
+    throw err;
   }
-  return data as T;
 }

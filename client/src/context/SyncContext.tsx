@@ -29,18 +29,43 @@ interface SyncCtx {
 
 const Ctx = createContext<SyncCtx>(null as any);
 
+const WARM_CACHE_PATHS = [
+  '/dashboard',
+  '/lots',
+  '/bags',
+  '/bags/print-jobs',
+  '/masters/catalog',
+  '/masters/suppliers',
+  '/masters/customers',
+  '/production',
+  '/sales',
+  '/purchases',
+  '/expenses',
+  '/payments',
+  '/accounting/coa',
+  '/reports/stock-valuation',
+];
+
 export function SyncProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
-  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const [browserOnline, setBrowserOnline] = useState(() => navigator.onLine);
+  const [backendReachable, setBackendReachable] = useState(() => navigator.onLine);
   const [isSyncing, setIsSyncing] = useState(false);
   const [outbox, setOutbox] = useState<OutboxOp[]>([]);
   const [conflictCount, setConflictCount] = useState(0);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(() => localStorage.getItem('rm_last_sync'));
   const [snapshot, setSnapshot] = useState<any | null>(null);
 
+  const isOnline = browserOnline && backendReachable;
+
   const reloadOutbox = useCallback(async () => {
     const ops = await listOutboxOps();
     setOutbox(ops);
+  }, []);
+
+  const warmOfflineReadCache = useCallback(async () => {
+    if (!navigator.onLine) return;
+    await Promise.allSettled(WARM_CACHE_PATHS.map((p) => apiFetch(p)));
   }, []);
 
   const refreshSnapshot = useCallback(async () => {
@@ -51,12 +76,14 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
       const snap = await apiFetch('/sync/pull');
       await cacheSnapshot(snap);
       setSnapshot(snap);
-      const conflicts = await apiFetch<any[]>('/sync/conflicts');
+      setBackendReachable(true);
+      const conflicts = await apiFetch<any[]>('/sync/conflicts').catch(() => []);
       setConflictCount(conflicts.filter((c) => c.resolution_status === 'PENDING').length);
+      warmOfflineReadCache();
     } catch {
       // stay on cached snapshot if network fails
     }
-  }, [user]);
+  }, [user, warmOfflineReadCache]);
 
   const syncNow = useCallback(async () => {
     if (!user || !navigator.onLine || isSyncing) return;
@@ -136,15 +163,22 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const onOnline = () => {
-      setIsOnline(true);
+      setBrowserOnline(true);
+      setBackendReachable(true);
       syncNow();
     };
-    const onOffline = () => setIsOnline(false);
+    const onOffline = () => setBrowserOnline(false);
+    const onNetStatus = (ev: Event) => {
+      const reachable = Boolean((ev as CustomEvent)?.detail?.reachable);
+      setBackendReachable(reachable);
+    };
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
+    window.addEventListener('rm:network-status', onNetStatus);
     return () => {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
+      window.removeEventListener('rm:network-status', onNetStatus);
     };
   }, [syncNow]);
 
@@ -155,6 +189,19 @@ export function SyncProvider({ children }: { children: React.ReactNode }) {
       syncNow();
     }
   }, [user, reloadOutbox, refreshSnapshot, syncNow]);
+
+  // Auto-retry pending outbox when mill Wi-Fi recovers even if browser 'online' event already fired
+  useEffect(() => {
+    if (!user) return;
+    const pending = outbox.some((o) => o.syncStatus === 'Local' || o.syncStatus === 'Rejected');
+    if (!pending) return;
+    const timer = setInterval(() => {
+      if (navigator.onLine && !isSyncing) {
+        syncNow();
+      }
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [user, outbox, isSyncing, syncNow]);
 
   const pendingCount = outbox.filter((o) => o.syncStatus === 'Local' || o.syncStatus === 'Syncing').length;
 

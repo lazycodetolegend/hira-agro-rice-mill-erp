@@ -8,10 +8,11 @@ import { StatusBadge } from '../components/StatusBadge';
 
 export function SyncConflictsPage() {
   const { hasPerm } = useAuth();
-  const { isOnline, isSyncing, outbox, lastSyncedAt, syncNow } = useSync();
+  const { isOnline, isSyncing, outbox, lastSyncedAt, syncNow, refreshSnapshot } = useSync();
   const [conflicts, setConflicts] = useState<any[]>([]);
   const [note, setNote] = useState('');
   const [msg, setMsg] = useState('');
+  const [preloading, setPreloading] = useState(false);
 
   const loadConflicts = async () => {
     if (!isOnline) return;
@@ -42,7 +43,19 @@ export function SyncConflictsPage() {
             Last Sync: {lastSyncedAt ? new Date(lastSyncedAt).toLocaleString('en-IN') : 'Never'} • Status: {isOnline ? 'Online' : 'Offline'}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={async () => {
+              setPreloading(true);
+              await refreshSnapshot();
+              setPreloading(false);
+              setMsg('All master data, bags, lots, bills & accounts downloaded for offline use!');
+            }}
+            disabled={!isOnline || preloading}
+            className="btn-secondary"
+          >
+            {preloading ? 'Saving...' : 'Preload Offline Cache'}
+          </button>
           <button onClick={syncNow} disabled={!isOnline || isSyncing} className="btn-primary">
             <RefreshCw className={`w-5 h-5 ${isSyncing ? 'animate-spin' : ''}`} /> Sync Now
           </button>

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Truck, Plus, CheckCircle, AlertTriangle, Calculator, Scale, FileText, Trash2, QrCode } from 'lucide-react';
-import { apiFetch } from '../api/client';
+import { apiFetch, isNetworkError } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { useSync } from '../context/SyncContext';
 import { StatusBadge } from '../components/StatusBadge';
@@ -9,7 +9,7 @@ import { BillPreviewModal, type BillData } from '../components/BillPreviewModal'
 
 export function LotsPage({ onCreateBagsForLot }: { onCreateBagsForLot?: (lot: any) => void }) {
   const { hasPerm, business } = useAuth();
-  const { isOnline, snapshot, queueOfflineOp } = useSync();
+  const { isOnline, snapshot, outbox, queueOfflineOp } = useSync();
 
   const [lots, setLots] = useState<any[]>([]);
   const [catalog, setCatalog] = useState<any>({ products: [], varieties: [], warehouses: [], taxes: [] });
@@ -60,6 +60,43 @@ export function LotsPage({ onCreateBagsForLot }: { onCreateBagsForLot?: (lot: an
   const [wastageKg, setWastageKg] = useState('');
   const [wastageReason, setWastageReason] = useState('');
 
+  const mergePendingLots = (baseLots: any[]) => {
+    const pending = outbox
+      .filter((o) => o.entityType === 'LOT_DRAFT' && o.syncStatus !== 'Synced')
+      .map((o) => {
+        const p = o.payload || {};
+        const prod = catalog.products.find((pr: any) => pr.id === p.productId) || snapshot?.products?.find((pr: any) => pr.id === p.productId);
+        const wh = catalog.warehouses.find((w: any) => w.id === p.warehouseId) || snapshot?.warehouses?.find((w: any) => w.id === p.warehouseId);
+        const factor = p.unit === 'ton' ? 1000 : p.unit === 'quintal' ? 100 : p.unit === 'g' ? 0.001 : p.unit === 'bag' ? 50 : 1;
+        const netKg =
+          p.weightMode === 'BAG_BY_BAG'
+            ? Number(p.weighbridgeGross || 0)
+            : Math.max(0, (Number(p.weighbridgeGross || 0) - Number(p.tareWeight || 0)) * factor);
+        const rateFactor = p.rateUnit === 'ton' ? 1000 : p.rateUnit === 'quintal' ? 100 : 1;
+        const ratePerKg = Number(p.ratePerUnit || 0) / rateFactor;
+        return {
+          id: `offline-${o.idempotencyKey}`,
+          lot_number: `OFF-${o.idempotencyKey.slice(0, 6).toUpperCase()}`,
+          receiving_number: `RCV-OFF-${o.idempotencyKey.slice(0, 6).toUpperCase()}`,
+          truck_number: p.truckNumber,
+          customer_name: p.customerName,
+          customer_phone: p.customerPhone,
+          supplier_invoice_no: p.supplierInvoiceNo,
+          product_id: p.productId,
+          product_name: prod?.name || 'Paddy/Rice',
+          warehouse_id: p.warehouseId,
+          warehouse_name: wh?.name || 'Godown',
+          received_qty_kg: Number(netKg.toFixed(2)),
+          rate_per_kg: Number(ratePerKg.toFixed(4)),
+          freight_charges: Number(p.freightCharges || 0),
+          bill_type: p.billType || 'SUPPLY_ONLY',
+          status: `Offline (${o.syncStatus})`,
+          created_at: o.offlineCreatedAt,
+        };
+      });
+    return [...pending, ...baseLots];
+  };
+
   const loadData = async () => {
     if (isOnline) {
       const [l, cat, sups] = await Promise.all([
@@ -67,7 +104,7 @@ export function LotsPage({ onCreateBagsForLot }: { onCreateBagsForLot?: (lot: an
         apiFetch<any>('/masters/catalog'),
         apiFetch<any[]>('/masters/suppliers'),
       ]);
-      setLots(l);
+      setLots(mergePendingLots(l));
       setCatalog(cat);
       setSuppliers(sups);
       if (!productId && cat.products.length) {
@@ -81,20 +118,37 @@ export function LotsPage({ onCreateBagsForLot }: { onCreateBagsForLot?: (lot: an
         setTaxId(gstTax.id);
       }
     } else if (snapshot) {
-      setLots(snapshot.lots || []);
-      setCatalog({
+      setLots(mergePendingLots(snapshot.lots || []));
+      const offlineCat = {
         products: snapshot.products || [],
         varieties: snapshot.varieties || [],
         warehouses: snapshot.warehouses || [],
-        taxes: [],
-      });
+        taxes: snapshot.taxes || [],
+      };
+      setCatalog(offlineCat);
       setSuppliers(snapshot.suppliers || []);
+      if (!productId && offlineCat.products.length) setProductId(offlineCat.products[0].id);
+      if (!varietyId && offlineCat.varieties.length) setVarietyId(offlineCat.varieties[0].id);
+      if (!warehouseId && offlineCat.warehouses.length) setWarehouseId(offlineCat.warehouses[0].id);
+      if (!taxId && offlineCat.taxes.length) {
+        const gstTax = offlineCat.taxes.find((tx: any) => tx.rate_percent > 0) || offlineCat.taxes[0];
+        setTaxId(gstTax.id);
+      }
+    } else {
+      const [l, cat, sups] = await Promise.all([
+        apiFetch<any[]>('/lots').catch(() => []),
+        apiFetch<any>('/masters/catalog').catch(() => ({ products: [], varieties: [], warehouses: [], taxes: [] })),
+        apiFetch<any[]>('/masters/suppliers').catch(() => []),
+      ]);
+      setLots(mergePendingLots(l));
+      setCatalog(cat);
+      setSuppliers(sups);
     }
   };
 
   useEffect(() => {
     loadData();
-  }, [isOnline]);
+  }, [isOnline, outbox.length]);
 
   // Auto-pick matching product when Material Type changes
   const handleMaterialChange = (mat: string) => {
@@ -246,6 +300,70 @@ export function LotsPage({ onCreateBagsForLot }: { onCreateBagsForLot?: (lot: an
       status: isOnline ? 'Received' : 'Draft',
     };
 
+    const buildOfflineBillLot = (opKey: string) => {
+      const prod = catalog.products.find((p: any) => p.id === productId);
+      const sub = Number(goodsSubtotalPreview.toFixed(2));
+      const taxAmt = Number(taxAmtPreview.toFixed(2));
+      const freight = Number(freightCharges || 0);
+      const totalAmt = Number((sub + taxAmt + freight).toFixed(2));
+      const docNum = `OFF-BILL-${opKey.slice(0, 6).toUpperCase()}`;
+      return {
+        id: `offline-${opKey}`,
+        lot_number: `OFF-${opKey.slice(0, 6).toUpperCase()}`,
+        receiving_number: `RCV-OFF-${opKey.slice(0, 6).toUpperCase()}`,
+        truck_number: truckNumber,
+        customer_name: customerName.trim() || 'Walk-in Customer',
+        customer_phone: customerPhone.trim() || undefined,
+        supplier_invoice_no: supplierInvoiceNo,
+        product_name: prod?.name || 'Paddy/Rice',
+        received_qty_kg: Number(netKgPreview.toFixed(2)),
+        rate_per_kg: Number(ratePerKgPreview.toFixed(4)),
+        freight_charges: freight,
+        bill_type: billType,
+        created_at: new Date().toISOString(),
+        generated_bill: autoGenerateBill
+          ? {
+              doc_number: docNum,
+              doc_date: new Date().toISOString().slice(0, 10),
+              bill_type: billType,
+              subtotal: sub,
+              freight_amount: freight,
+              discount_amount: 0,
+              tax_amount: taxAmt,
+              total_amount: totalAmt,
+              lines: [
+                {
+                  description: prod?.name || 'Paddy / Rice',
+                  hsn_code: prod?.hsn_code,
+                  qty_kg: Number(netKgPreview.toFixed(2)),
+                  rate_per_kg: Number(ratePerKgPreview.toFixed(4)),
+                  tax_rate_percent: taxPercentPreview,
+                  tax_amount: taxAmt,
+                  line_total: Number((sub + taxAmt).toFixed(2)),
+                },
+              ],
+            }
+          : null,
+      };
+    };
+
+    const saveOfflineLot = async () => {
+      const op = await queueOfflineOp('LOT_DRAFT', 'CREATE_LOT_DRAFT', { ...payload, status: 'Received' });
+      const offlineLot = buildOfflineBillLot(op.idempotencyKey);
+      setMsg(
+        `Saved OFFLINE (${offlineLot.lot_number}, ${offlineLot.received_qty_kg} kg).${autoGenerateBill ? ' Offline bill ready — auto-syncs when online!' : ' Will auto-sync when Wi-Fi returns.'}`
+      );
+      setShowCreate(false);
+      setTruckNumber('');
+      setCustomerName('');
+      setCustomerPhone('');
+      setWeighedBags([]);
+      await loadData();
+      if (autoGenerateBill) {
+        openLotBill(offlineLot);
+      }
+    };
+
     try {
       if (isOnline) {
         const created = await apiFetch('/lots', { method: 'POST', body: JSON.stringify(payload) });
@@ -262,12 +380,14 @@ export function LotsPage({ onCreateBagsForLot }: { onCreateBagsForLot?: (lot: an
           openLotBill(created);
         }
       } else {
-        await queueOfflineOp('LOT_DRAFT', 'CREATE_LOT_DRAFT', payload);
-        setMsg('Saved offline as Draft Receiving entry. Will sync and generate accounting bill when online.');
-        setShowCreate(false);
+        await saveOfflineLot();
       }
     } catch (err: any) {
-      setError(err.message);
+      if (isNetworkError(err)) {
+        await saveOfflineLot();
+      } else {
+        setError(err.message);
+      }
     }
   };
 
